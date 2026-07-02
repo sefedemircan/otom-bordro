@@ -164,6 +164,86 @@ def expected_daily_hours(row, is_weekday):
     ms_h = column_hours(row, "MS")
     return ms_h if ms_h > 0 else SUNDAY_CUT_ABSENCE_HOURS
 
+def series_hours(df, column):
+    if column not in df.columns:
+        return pd.Series(0.0, index=df.index)
+    return df[column].apply(time_to_hours)
+
+def count_positive_days(hours_series):
+    return int((hours_series > 0).sum())
+
+def build_leave_breakdown(df_calc):
+    izs_h = series_hours(df_calc, "IZS")
+    yizs_h = series_hours(df_calc, "YIZS")
+    sgkizs_h = series_hours(df_calc, "SGKIZS")
+    rm_h = series_hours(df_calc, "RM")
+    uczizs_h = series_hours(df_calc, "UCZIZS")
+
+    yillik_mask = df_calc["izin_turu"] == "Yıllık İzin"
+    rapor_mask = df_calc["izin_turu"] == "Sağlık Raporu"
+    ucretli_mask = (df_calc["izin_turu"] == "Ücretli İzin") & ~yillik_mask & ~rapor_mask
+    sgk_gun_mask = rapor_mask | (sgkizs_h > 0) | (rm_h > 0)
+
+    yillik_saat = df_calc.loc[yillik_mask, "ucretli_izin_h"].sum()
+    if yillik_saat == 0:
+        yillik_saat = yizs_h.sum()
+
+    ucretli_saat = df_calc.loc[ucretli_mask, "ucretli_izin_h"].sum()
+    if ucretli_saat == 0:
+        ucretli_saat = izs_h.sum()
+
+    rapor_saat = max(
+        df_calc.loc[rapor_mask, "ucretli_izin_h"].sum(),
+        sgkizs_h.sum(),
+        rm_h.sum(),
+    )
+
+    rows = [
+        {
+            "Kategori": "Çalışma",
+            "Gün": int((df_calc["gun_durumu"] == "Çalışma").sum()),
+            "Saat": hours_to_time(df_calc.loc[df_calc["gun_durumu"] == "Çalışma", "NM_h"].sum()),
+            "Kaynak": "NM",
+        },
+        {
+            "Kategori": "Yıllık İzin",
+            "Gün": int(yillik_mask.sum()) or count_positive_days(yizs_h),
+            "Saat": hours_to_time(yillik_saat),
+            "Kaynak": "YIZS / IZS / EM",
+        },
+        {
+            "Kategori": "Ücretli İzin",
+            "Gün": int(ucretli_mask.sum()) or count_positive_days(izs_h),
+            "Saat": hours_to_time(ucretli_saat),
+            "Kaynak": "IZS / EM",
+        },
+        {
+            "Kategori": "SGK Raporu",
+            "Gün": int(sgk_gun_mask.sum()),
+            "Saat": hours_to_time(rapor_saat),
+            "Kaynak": "SGKIZS / RM",
+        },
+        {
+            "Kategori": "Ücretsiz İzin",
+            "Gün": int((df_calc["gun_durumu"] == "Ücretsiz İzin").sum()),
+            "Saat": hours_to_time(uczizs_h.sum()),
+            "Kaynak": "UCZIZS",
+        },
+        {
+            "Kategori": "Devamsızlık",
+            "Gün": int((df_calc["gun_durumu"] == "Devamsızlık").sum()),
+            "Saat": hours_to_time(df_calc["devamsizlik_h"].sum()),
+            "Kaynak": "Mazeretsiz eksik",
+        },
+        {
+            "Kategori": "Hafta Sonu",
+            "Gün": int((df_calc["gun_durumu"] == "Hafta Sonu").sum()),
+            "Saat": "—",
+            "Kaynak": "Cumartesi / Pazar",
+        },
+    ]
+    return pd.DataFrame(rows)
+
 def calculate_puantaj(df):
     df_calc = normalize_meyer_rows(df)
 
@@ -217,9 +297,15 @@ def calculate_puantaj(df):
             ).any()
         )
 
-        week_start = df_calc.loc[week_mask, "mesaitarih_dt"].min()
+        week_dates = df_calc.loc[week_mask, "mesaitarih_dt"]
+        week_start = week_dates.min()
+        week_end = week_dates.max()
+        days_in_data = int(week_mask.sum())
         weekly_rows.append({
             "Hafta": f"{week_start.strftime('%d.%m.%Y')} (H{int(week)})",
+            "Kapsam": f"{week_start.strftime('%d.%m')} – {week_end.strftime('%d.%m')}",
+            "Gün (dosyada)": days_in_data,
+            "Tür": "Kısmi" if days_in_data < 7 else "Tam",
             "Hafta İçi NM": hours_to_time(df_calc.loc[weekday_mask, "NM_h"].sum()),
             "Hafta Sonu FM": hours_to_time(df_calc.loc[weekend_mask, "FM_h"].sum()),
             "Toplam NM": hours_to_time(df_calc.loc[week_mask, "NM_h"].sum()),
@@ -228,6 +314,11 @@ def calculate_puantaj(df):
         })
 
     weekly_df = pd.DataFrame(weekly_rows)
+    leave_breakdown_df = build_leave_breakdown(df_calc)
+
+    period_start = df_calc["mesaitarih_dt"].min()
+    period_end = df_calc["mesaitarih_dt"].max()
+    kismi_hafta = int((weekly_df["Tür"] == "Kısmi").sum()) if not weekly_df.empty else 0
 
     summary = {
         "toplam_nm": df_calc["NM_h"].sum(),
@@ -240,6 +331,11 @@ def calculate_puantaj(df):
         "devamsizlik_saat": df_calc["devamsizlik_h"].sum(),
         "calisma_gun": int((df_calc["gun_durumu"] == "Çalışma").sum()),
         "pazar_yanan_hafta": int((weekly_df["Pazar Durumu"] == "Yanar").sum()),
+        "donem": f"{period_start.strftime('%d.%m.%Y')} – {period_end.strftime('%d.%m.%Y')}",
+        "toplam_gun": len(df_calc),
+        "iso_hafta_sayisi": len(weekly_df),
+        "kisami_hafta_sayisi": kismi_hafta,
+        "tam_hafta_sayisi": len(weekly_df) - kismi_hafta,
     }
 
     daily_df = pd.DataFrame({
@@ -268,7 +364,7 @@ def calculate_puantaj(df):
                  "beklenen_gunluk_h", "devamsizlik_h"]
     )
 
-    return df_calc, daily_df, weekly_df, summary
+    return df_calc, daily_df, weekly_df, leave_breakdown_df, summary
 
 # ── Arayüz ─────────────────────────────────────────────────────────────────
 
@@ -314,36 +410,34 @@ if uploaded_file is not None:
                 st.info("NM, FM veya izin sütunlarını düzenleyebilirsiniz. Değişiklikler anında yansır.")
                 edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic", key="editor")
 
-            processed_df, daily_df, weekly_df, summary = calculate_puantaj(edited_df)
+            processed_df, daily_df, weekly_df, leave_breakdown_df, summary = calculate_puantaj(edited_df)
 
             st.divider()
             st.subheader("Özet")
+
+            st.caption(f"**Dönem:** {summary['donem']} · **Toplam kayıt:** {summary['toplam_gun']} gün")
 
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Toplam NM", hours_to_time(summary["toplam_nm"]))
             m2.metric("Toplam FM", hours_to_time(summary["toplam_fm"]))
             m3.metric("Çalışılan Gün", summary["calisma_gun"])
-            m4.metric("Devamsızlık", f"{summary['devamsizlik_gun']} gün")
+            m4.metric("Pazar Kesilen Hafta", summary["pazar_yanan_hafta"])
 
-            m5, m6, m7, m8 = st.columns(4)
-            m5.metric(
-                "Ücretli İzin",
-                f"{summary['ucretli_izin_gun']} gün",
-                delta=hours_to_time(summary["ucretli_izin_saat"]) + " saat",
-                delta_color="off",
-            )
-            m6.metric(
-                "Ücretsiz İzin",
-                f"{summary['ucretsiz_izin_gun']} gün",
-                delta=hours_to_time(summary["ucretsiz_izin_saat"]) + " saat" if summary["ucretsiz_izin_gun"] else None,
-                delta_color="off",
-            )
-            m7.metric("Hafta Sayısı", len(weekly_df))
-            m8.metric("Toplam Kayıt", len(daily_df))
+            st.markdown("**İzin, rapor ve devamsızlık dağılımı**")
+            st.dataframe(leave_breakdown_df, use_container_width=True, hide_index=True)
 
-            m9, m10 = st.columns(2)
-            m9.metric("Devamsızlık Saati", hours_to_time(summary["devamsizlik_saat"]))
-            m10.metric("Pazar Yanan Hafta", summary["pazar_yanan_hafta"])
+            st.markdown("**Dönem ve hafta bilgisi**")
+            h1, h2, h3, h4 = st.columns(4)
+            h1.metric("ISO Hafta Sayısı", summary["iso_hafta_sayisi"])
+            h2.metric("Tam Hafta", summary["tam_hafta_sayisi"])
+            h3.metric("Kısmi Hafta", summary["kisami_hafta_sayisi"])
+            h4.metric("Devamsızlık", f"{summary['devamsizlik_gun']} gün · {hours_to_time(summary['devamsizlik_saat'])}")
+
+            st.info(
+                "Hafta sayısı takvim ayına göre sabit değildir. Dosyadaki tarihlerin düştüğü "
+                "**ISO haftaları** (Pazartesi–Pazar) sayılır. Ayın 1'i veya son günü haftanın ortasındaysa "
+                "o hafta **kısmi** görünür; dosyada o haftaya ait kaç gün varsa o kadar gün listelenir."
+            )
 
             st.divider()
             st.subheader("Günlük Özet")
