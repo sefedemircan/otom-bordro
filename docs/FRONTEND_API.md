@@ -1,6 +1,8 @@
 # Frontend API Referansı (Next.js)
 
-Bu doküman, Streamlit demo arayüzündeki **iki sayfa** akışını Next.js frontend’e taşırken kullanılacak **tek kaynak**tır. Backend FastAPI’dir, **stateless** çalışır: sunucu dosya tutmaz; her istekte dosyayı yeniden gönderirsiniz (veya düzenlenmiş satırları JSON olarak iletirsiniz).
+Ürün / ekran tanıtımı için önce: [`PROJECT_OVERVIEW.md`](./PROJECT_OVERVIEW.md).
+
+Bu doküman, Streamlit demo arayüzündeki **iki sayfa** akışını Next.js frontend’e taşırken kullanılacak **API sözleşmesi**dir. Backend FastAPI’dir, **stateless** çalışır: sunucu dosya tutmaz; her istekte dosyayı yeniden gönderirsiniz (veya düzenlenmiş satırları JSON olarak iletirsiniz).
 
 - OpenAPI / Swagger UI: `{API_BASE}/docs`
 - ReDoc: `{API_BASE}/redoc`
