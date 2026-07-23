@@ -30,7 +30,7 @@ from puantaj_report import CODE_LEGEND, STATUS_LABELS  # noqa: E402
 app = FastAPI(
     title="Bordro / Puantaj API",
     description=(
-        "Meyer puantaj hesaplama ve aylık rapor API'si. "
+        "Meyer puantaj hesaplama ve aylık rapor API. "
         "Stateless: her istekte dosya yeniden yüklenir. "
         "Frontend referansı: docs/FRONTEND_API.md"
     ),
