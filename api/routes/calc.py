@@ -33,16 +33,38 @@ def _employee_label(df: pd.DataFrame, fallback: str = "Personel") -> str:
     return fallback
 
 
+def _parse_optional_int(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        raise api_error(400, "INVALID_PERIOD", "year ve month tam sayı olmalıdır.") from None
+
+
 def _compute_payload(
     df: pd.DataFrame,
     employee_label: str | None = None,
     sicilno: str | None = None,
+    year: int | None = None,
+    month: int | None = None,
 ) -> dict[str, Any]:
+    if (year is None) ^ (month is None):
+        raise api_error(400, "INVALID_PERIOD", "year ve month birlikte gönderilmelidir.")
+    if month is not None and not (1 <= month <= 12):
+        raise api_error(400, "INVALID_PERIOD", "month 1–12 arasında olmalıdır.")
     try:
-        processed_df, daily_df, weekly_df, leave_breakdown_df, summary = calculate_puantaj(df)
+        processed_df, daily_df, weekly_df, leave_breakdown_df, summary = calculate_puantaj(
+            df, year=year, month=month
+        )
     except ValueError as exc:
         message = str(exc)
-        code = "MISSING_COLUMNS" if "Zorunlu sütunlar" in message else "INVALID_FILE"
+        if "döneminde kayıt" in message or "month 1–12" in message:
+            code = "INVALID_PERIOD"
+        elif "Zorunlu sütunlar" in message:
+            code = "MISSING_COLUMNS"
+        else:
+            code = "INVALID_FILE"
         raise api_error(400, code, message) from exc
 
     summary = dict(summary)
@@ -90,7 +112,14 @@ async def compute(request: Request) -> ComputeResponse:
         payload = await request.json()
         body = ComputeJsonRequest.model_validate(payload)
         df = rows_to_dataframe(body.rows)
-        return ComputeResponse(**_compute_payload(df, body.employee_label))
+        return ComputeResponse(
+            **_compute_payload(
+                df,
+                body.employee_label,
+                year=body.year,
+                month=body.month,
+            )
+        )
 
     form = await request.form()
     upload = form.get("file")
@@ -103,6 +132,8 @@ async def compute(request: Request) -> ComputeResponse:
 
     sicil_raw = form.get("sicilno")
     sicilno = str(sicil_raw).strip() if sicil_raw not in (None, "") else None
+    year = _parse_optional_int(form.get("year"))
+    month = _parse_optional_int(form.get("month"))
 
     data, filename = await read_upload_bytes(upload)  # type: ignore[arg-type]
     master_df = load_calc_dataframe(data, filename)
@@ -120,7 +151,9 @@ async def compute(request: Request) -> ComputeResponse:
             raise api_error(400, "EMPLOYEE_NOT_FOUND", f"Sicil bulunamadı: {sicilno}")
         employee_df = normalize_meyer_rows(employee_df)
         label = _employee_label(employee_df)
-        return ComputeResponse(**_compute_payload(employee_df, label, sicilno))
+        return ComputeResponse(
+            **_compute_payload(employee_df, label, sicilno, year=year, month=month)
+        )
 
     df = normalize_meyer_rows(master_df)
     if sicilno:
@@ -129,4 +162,4 @@ async def compute(request: Request) -> ComputeResponse:
             raise api_error(400, "EMPLOYEE_NOT_FOUND", f"Sicil bulunamadı: {sicilno}")
         df = normalize_meyer_rows(filtered)
     label = _employee_label(df)
-    return ComputeResponse(**_compute_payload(df, label, sicilno))
+    return ComputeResponse(**_compute_payload(df, label, sicilno, year=year, month=month))

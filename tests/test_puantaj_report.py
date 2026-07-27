@@ -133,3 +133,81 @@ def test_sakra_horizontal_workbook_is_detected():
 
     assert len(source) == 1
     assert result.monthly.loc[0, "01 Ça"] == 9
+
+
+def july_week_with_june_context(*, june_absent: bool = True, june_leave_col: str | None = None):
+    """Temmuz 2026 Çarşamba başlar; ISO hafta: 29–30 Haz + 1–5 Tem."""
+    rows = []
+    # Bağlam: Pazartesi–Salı (Haziran)
+    for day, weekday_nm in ((29, 0 if june_absent and not june_leave_col else 9), (30, 0 if june_absent and not june_leave_col else 9)):
+        row = {
+            "sicilno": "00010",
+            "Ad": "BAGLAM",
+            "Soyad": "TEST",
+            "mesaitarih": pd.Timestamp(2026, 6, day),
+            "NM": time(weekday_nm) if weekday_nm else time(0),
+            "FM": time(0),
+            "MS": time(9),
+            "EM": time(9) if june_absent and not june_leave_col else time(0),
+            "IZS": time(0),
+            "YIZS": time(0),
+            "SGKIZS": time(0),
+            "UCZIZS": time(0),
+            "RM": time(0),
+            "İzin Açıklama": "#__#",
+            "Bölüm": "Üretim",
+            "Kaynak Kod": "",
+        }
+        if june_leave_col:
+            row["NM"] = time(0)
+            row["EM"] = time(0)
+            row[june_leave_col] = time(7, 30)
+        rows.append(row)
+
+    # Temmuz: Çar–Cum çalış, Cmt mesaisiz, Pz hafta tatili
+    for day in range(1, 6):
+        is_weekday = day <= 3  # 1 Ça, 2 Pe, 3 Cu
+        rows.append({
+            "sicilno": "00010",
+            "Ad": "BAGLAM",
+            "Soyad": "TEST",
+            "mesaitarih": pd.Timestamp(2026, 7, day),
+            "NM": time(9) if is_weekday else time(0),
+            "FM": time(0),
+            "MS": time(9) if is_weekday else time(0),
+            "EM": time(0),
+            "IZS": time(0),
+            "YIZS": time(0),
+            "SGKIZS": time(0),
+            "UCZIZS": time(0),
+            "RM": time(0),
+            "İzin Açıklama": "#__#",
+            "Bölüm": "Üretim",
+            "Kaynak Kod": "",
+        })
+    return pd.DataFrame(rows)
+
+
+def test_context_june_absence_cuts_july_sunday():
+    frame = july_week_with_june_context(june_absent=True)
+    result = build_report(frame, 2026, 7)
+
+    assert result.monthly.loc[0, "05 Pz"] == "Z"
+    assert result.weekly.loc[0, "Pazar Durumu"] == "Kesildi"
+    # Detayda yalnızca Temmuz; Haziran bağlam satırları dönem dışına düşer
+    assert result.daily["Tarih"].dt.month.eq(7).all()
+    assert len(result.daily) == 5
+    # Bağlam NM ve Haziran satırları Temmuz Normal Çalışma'ya eklenmez; yalnızca 3×9
+    assert float(result.summary.loc[0, "Normal Çalışma"]) == 27.0
+    assert int(result.summary.loc[0, "Devamsızlık (gün)"]) == 0
+
+
+def test_context_june_protected_leave_keeps_july_sunday():
+    frame = july_week_with_june_context(june_absent=False, june_leave_col="YIZS")
+    result = build_report(frame, 2026, 7)
+
+    assert result.weekly.loc[0, "Pazar Durumu"] == "Hak Edildi"
+    assert result.monthly.loc[0, "05 Pz"] == "T"
+    assert result.monthly.loc[0, "04 Ct"] == "A3"
+    assert float(result.summary.loc[0, "Normal Çalışma"]) == 27.0
+    assert int(result.summary.loc[0, "Yıllık İzin (gün)"]) == 0

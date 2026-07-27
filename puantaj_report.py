@@ -544,7 +544,9 @@ def prepare_daily(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
 
 
 def _period_mask(daily: pd.DataFrame, year: int, month: int) -> pd.Series:
-    return daily["Tarih"].dt.year.eq(year) & daily["Tarih"].dt.month.eq(month)
+    from puantaj_calc import period_mask
+
+    return period_mask(daily["Tarih"], year, month)
 
 
 def build_report(df: pd.DataFrame, year: int | None = None, month: int | None = None) -> ReportResult:

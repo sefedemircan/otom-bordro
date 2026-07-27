@@ -69,6 +69,9 @@ class CalcSummary(BaseModel):
     iso_hafta_sayisi: int
     kisami_hafta_sayisi: int
     tam_hafta_sayisi: int
+    period_year: int | None = None
+    period_month: int | None = None
+    baglam_gun: int = 0
     employee_label: str | None = None
     sicilno: str | None = None
 
@@ -84,6 +87,8 @@ class ComputeResponse(BaseModel):
 class ComputeJsonRequest(BaseModel):
     rows: list[dict[str, Any]] = Field(..., min_length=1)
     employee_label: str | None = None
+    year: int | None = None
+    month: int | None = None
 
 
 class PeriodItem(BaseModel):

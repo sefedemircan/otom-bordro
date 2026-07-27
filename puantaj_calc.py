@@ -212,6 +212,31 @@ def count_positive_days(hours_series):
     return int((hours_series > 0).sum())
 
 
+def period_mask(dates: pd.Series, year: int, month: int) -> pd.Series:
+    """Takvim yılı/ayı ile dönem filtresi (rapor `_period_mask` ile aynı mantık)."""
+    return dates.dt.year.eq(year) & dates.dt.month.eq(month)
+
+
+def resolve_primary_period(
+    dates: pd.Series,
+    year: int | None = None,
+    month: int | None = None,
+) -> tuple[int, int]:
+    """Birincil dönem: verilen year/month veya en çok günü olan ay (eşitlikte daha geç ay)."""
+    if year is not None and month is not None:
+        if not (1 <= int(month) <= 12):
+            raise ValueError("month 1–12 arasında olmalıdır.")
+        return int(year), int(month)
+    if dates.empty:
+        raise ValueError("Raporlanabilir kayıt bulunamadı.")
+    periods = dates.dt.to_period("M")
+    counts = periods.value_counts()
+    max_count = int(counts.max())
+    candidates = counts[counts == max_count].index
+    primary = max(candidates)
+    return int(primary.year), int(primary.month)
+
+
 def build_leave_breakdown(df_calc):
     izs_h = series_hours(df_calc, "IZS")
     yizs_h = series_hours(df_calc, "YIZS")
@@ -285,12 +310,22 @@ def build_leave_breakdown(df_calc):
     return pd.DataFrame(rows)
 
 
-def calculate_puantaj(df):
+def calculate_puantaj(df, year: int | None = None, month: int | None = None):
     missing = [col for col in REQUIRED_CALC_COLUMNS if col not in df.columns]
     if missing:
         raise ValueError("Zorunlu sütunlar eksik: " + ", ".join(missing))
 
     df_calc = normalize_meyer_rows(df)
+    if df_calc.empty:
+        raise ValueError("Raporlanabilir kayıt bulunamadı.")
+
+    period_year, period_month = resolve_primary_period(
+        df_calc["mesaitarih_dt"], year=year, month=month
+    )
+    in_period = period_mask(df_calc["mesaitarih_dt"], period_year, period_month)
+    if not bool(in_period.any()):
+        raise ValueError(f"{period_month:02d}.{period_year} döneminde kayıt bulunamadı.")
+    df_calc["is_context"] = ~in_period
 
     df_calc["NM_h"] = df_calc["NM"].apply(time_to_hours)
     df_calc["FM_h"] = df_calc["FM"].apply(time_to_hours)
@@ -318,8 +353,8 @@ def calculate_puantaj(df):
     )
 
     weekly_rows = []
-    for (year, week) in df_calc[["year", "week"]].drop_duplicates().itertuples(index=False):
-        week_mask = (df_calc["year"] == year) & (df_calc["week"] == week)
+    for (iso_year, week) in df_calc[["year", "week"]].drop_duplicates().itertuples(index=False):
+        week_mask = (df_calc["year"] == iso_year) & (df_calc["week"] == week)
         weekday_mask = week_mask & (df_calc["day_of_week"] < 5)
         weekend_mask = week_mask & (df_calc["day_of_week"] >= 5)
 
@@ -342,6 +377,10 @@ def calculate_puantaj(df):
             ).any()
         )
 
+        # Haftalık özet: yalnızca birincil dönemle kesişen haftalar
+        if not bool((week_mask & ~df_calc["is_context"]).any()):
+            continue
+
         week_dates = df_calc.loc[week_mask, "mesaitarih_dt"]
         week_start = week_dates.min()
         week_end = week_dates.max()
@@ -359,38 +398,45 @@ def calculate_puantaj(df):
         })
 
     weekly_df = pd.DataFrame(weekly_rows)
-    leave_breakdown_df = build_leave_breakdown(df_calc)
+    period_df = df_calc.loc[~df_calc["is_context"]].copy()
+    leave_breakdown_df = build_leave_breakdown(period_df)
 
-    period_start = df_calc["mesaitarih_dt"].min()
-    period_end = df_calc["mesaitarih_dt"].max()
+    period_start = period_df["mesaitarih_dt"].min()
+    period_end = period_df["mesaitarih_dt"].max()
+    baglam_gun = int(df_calc["is_context"].sum())
     kismi_hafta = int((weekly_df["Tür"] == "Kısmi").sum()) if not weekly_df.empty else 0
 
     summary = {
-        "toplam_nm": float(df_calc["NM_h"].sum()),
-        "toplam_fm": float(df_calc["FM_h"].sum()),
-        "toplam_nm_fmt": hours_to_time(df_calc["NM_h"].sum()),
-        "toplam_fm_fmt": hours_to_time(df_calc["FM_h"].sum()),
-        "ucretli_izin_gun": int((df_calc["gun_durumu"] == "Ücretli İzin / Rapor").sum()),
-        "ucretli_izin_saat": float(df_calc["ucretli_izin_h"].sum()),
-        "ucretli_izin_saat_fmt": hours_to_time(df_calc["ucretli_izin_h"].sum()),
-        "ucretsiz_izin_gun": int((df_calc["gun_durumu"] == "Ücretsiz İzin").sum()),
-        "ucretsiz_izin_saat": float(df_calc["ucretsiz_izin_h"].sum()),
-        "ucretsiz_izin_saat_fmt": hours_to_time(df_calc["ucretsiz_izin_h"].sum()),
-        "devamsizlik_gun": int((df_calc["gun_durumu"] == "Devamsızlık").sum()),
-        "devamsizlik_saat": float(df_calc["devamsizlik_h"].sum()),
-        "devamsizlik_saat_fmt": hours_to_time(df_calc["devamsizlik_h"].sum()),
-        "calisma_gun": int((df_calc["gun_durumu"] == "Çalışma").sum()),
+        "toplam_nm": float(period_df["NM_h"].sum()),
+        "toplam_fm": float(period_df["FM_h"].sum()),
+        "toplam_nm_fmt": hours_to_time(period_df["NM_h"].sum()),
+        "toplam_fm_fmt": hours_to_time(period_df["FM_h"].sum()),
+        "ucretli_izin_gun": int((period_df["gun_durumu"] == "Ücretli İzin / Rapor").sum()),
+        "ucretli_izin_saat": float(period_df["ucretli_izin_h"].sum()),
+        "ucretli_izin_saat_fmt": hours_to_time(period_df["ucretli_izin_h"].sum()),
+        "ucretsiz_izin_gun": int((period_df["gun_durumu"] == "Ücretsiz İzin").sum()),
+        "ucretsiz_izin_saat": float(period_df["ucretsiz_izin_h"].sum()),
+        "ucretsiz_izin_saat_fmt": hours_to_time(period_df["ucretsiz_izin_h"].sum()),
+        "devamsizlik_gun": int((period_df["gun_durumu"] == "Devamsızlık").sum()),
+        "devamsizlik_saat": float(period_df["devamsizlik_h"].sum()),
+        "devamsizlik_saat_fmt": hours_to_time(period_df["devamsizlik_h"].sum()),
+        "calisma_gun": int((period_df["gun_durumu"] == "Çalışma").sum()),
         "pazar_yanan_hafta": int((weekly_df["Pazar Durumu"] == "Yanar").sum()) if not weekly_df.empty else 0,
         "donem": f"{period_start.strftime('%d.%m.%Y')} – {period_end.strftime('%d.%m.%Y')}",
-        "toplam_gun": len(df_calc),
+        "toplam_gun": len(period_df),
         "iso_hafta_sayisi": len(weekly_df),
         "kisami_hafta_sayisi": kismi_hafta,
         "tam_hafta_sayisi": len(weekly_df) - kismi_hafta,
+        "period_year": period_year,
+        "period_month": period_month,
+        "baglam_gun": baglam_gun,
     }
 
+    baglam_label = df_calc["is_context"].map(lambda v: "Evet" if v else "Hayır")
     daily_df = pd.DataFrame({
         "Tarih": df_calc["mesaitarih_dt"].dt.strftime("%d.%m.%Y"),
         "Gün": df_calc["day_of_week"].map(dict(enumerate(DAY_NAMES))),
+        "Bağlam": baglam_label,
         "Gün Durumu": df_calc["gun_durumu"],
         "İzin Türü": df_calc["izin_turu"].replace("", "—"),
         "NM (Güncel)": df_calc["NM_h"].apply(hours_to_time),
@@ -407,11 +453,12 @@ def calculate_puantaj(df):
     df_calc["Ücretli İzin"] = df_calc["ucretli_izin_h"].apply(hours_to_time)
     df_calc["Ücretsiz İzin"] = df_calc["ucretsiz_izin_h"].apply(hours_to_time)
     df_calc["Devamsızlık Saat"] = df_calc["devamsizlik_h"].apply(hours_to_time)
+    df_calc["Bağlam"] = baglam_label
 
     df_calc = df_calc.drop(
         columns=["mesaitarih_dt", "NM_h", "FM_h", "day_of_week", "year", "week",
                  "gun_durumu", "ucretli_izin_h", "ucretsiz_izin_h", "izin_turu",
-                 "beklenen_gunluk_h", "devamsizlik_h"]
+                 "beklenen_gunluk_h", "devamsizlik_h", "is_context"]
     )
 
     return df_calc, daily_df, weekly_df, leave_breakdown_df, summary
