@@ -381,6 +381,26 @@ def calculate_puantaj(df, year: int | None = None, month: int | None = None):
         if not bool((week_mask & ~df_calc["is_context"]).any()):
             continue
 
+        period_weekday_cut = bool(
+            (
+                df_calc.loc[weekday_mask & ~df_calc["is_context"], "devamsizlik_h"]
+                >= SUNDAY_CUT_ABSENCE_HOURS
+            ).any()
+        )
+        context_weekday_cut = bool(
+            (
+                df_calc.loc[weekday_mask & df_calc["is_context"], "devamsizlik_h"]
+                >= SUNDAY_CUT_ABSENCE_HOURS
+            ).any()
+        )
+        pazar_kaynak = ""
+        if pazar_kesinti_tetik:
+            pazar_kaynak = (
+                "Bağlam"
+                if context_weekday_cut and not period_weekday_cut
+                else "Dönem"
+            )
+
         week_dates = df_calc.loc[week_mask, "mesaitarih_dt"]
         week_start = week_dates.min()
         week_end = week_dates.max()
@@ -395,6 +415,7 @@ def calculate_puantaj(df, year: int | None = None, month: int | None = None):
             "Toplam NM": hours_to_time(df_calc.loc[week_mask, "NM_h"].sum()),
             "Toplam FM": hours_to_time(df_calc.loc[week_mask, "FM_h"].sum()),
             "Pazar Durumu": "Yanar" if pazar_kesinti_tetik else "Hak Edildi",
+            "Pazar Kaynağı": pazar_kaynak,
         })
 
     weekly_df = pd.DataFrame(weekly_rows)

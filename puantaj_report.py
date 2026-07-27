@@ -90,6 +90,7 @@ CODE_LEGEND = [
 EXCEL_CODE_COLORS = {
     "T": "D9EAD3",
     "Z": "F4CCCC",
+    "Z*": "FCE5CD",  # Bağlam gününden kaynaklı Pazar kesintisi (turuncu)
     "C": "F4CCCC",
     "Y": "D9EAF7",
     "Ü": "CFE2F3",
@@ -252,6 +253,39 @@ def _devamsizlik_hours(row: pd.Series) -> float:
     if ms > 0:
         return ms
     return FULL_DAY_HOURS
+
+
+def _weekdays_trigger_sunday_cut(weekday_slice: pd.DataFrame) -> bool:
+    """Hafta içi satırlarda mazeretsiz tam gün devamsızlık var mı?"""
+    if weekday_slice.empty:
+        return False
+    unprotected = weekday_slice.apply(_devamsizlik_hours, axis=1) >= FULL_DAY_HOURS - 0.01
+    protected = weekday_slice["Durum"].isin(SUNDAY_PROTECTING_STATUSES)
+    return bool((unprotected & ~protected).any())
+
+
+def _context_caused_sunday_cut(
+    week_days: pd.DataFrame,
+    year: int,
+    month: int,
+) -> bool:
+    """
+    Pazar kesintisi yalnızca önceki ay (bağlam) günlerindeki devamsızlıktan mı geliyor?
+    Dönem içi hafta içi tetik yoksa ve bağlamda tetik varsa True.
+    """
+    if week_days.empty:
+        return False
+    weekdays = week_days[week_days["day_of_week"] < 5]
+    sundays = week_days[week_days["day_of_week"] == 6]
+    source_burned = bool(sundays["Durum"].eq("UCRETSIZ_HAFTA_TATILI").any()) if not sundays.empty else False
+    if source_burned:
+        return False
+    in_period = _period_mask(weekdays, year, month) if not weekdays.empty else pd.Series(dtype=bool)
+    period_triggers = _weekdays_trigger_sunday_cut(weekdays.loc[in_period]) if not weekdays.empty else False
+    if period_triggers:
+        return False
+    context_triggers = _weekdays_trigger_sunday_cut(weekdays.loc[~in_period]) if not weekdays.empty else False
+    return context_triggers
 
 
 def _classify_row(row: pd.Series) -> str:
@@ -578,6 +612,43 @@ def build_report(df: pd.DataFrame, year: int | None = None, month: int | None = 
         weekly_all.apply(lambda r: (r["Sicil No"], int(r["Hafta"].split("-H")[0]), int(r["Hafta"].split("-H")[1])) in weekly_keys, axis=1)
     ].copy()
 
+    # Bağlam kaynaklı Pazar Z → matriste Z* (UI/Excel turuncu)
+    sunday_z_mask = daily["Kod"].eq("Z") & daily["day_of_week"].eq(6)
+    pazar_kaynak: dict[tuple[str, int, int], str] = {}
+    for idx in daily.index[sunday_z_mask]:
+        sicilno = daily.at[idx, "sicilno"]
+        iso_year = int(daily.at[idx, "iso_year"])
+        iso_week = int(daily.at[idx, "iso_week"])
+        week_days = daily_all[
+            daily_all["sicilno"].eq(sicilno)
+            & daily_all["iso_year"].eq(iso_year)
+            & daily_all["iso_week"].eq(iso_week)
+        ]
+        if _context_caused_sunday_cut(week_days, year, month):
+            daily.at[idx, "Kod"] = "Z*"
+            pazar_kaynak[(sicilno, iso_year, iso_week)] = "Bağlam"
+        else:
+            pazar_kaynak[(sicilno, iso_year, iso_week)] = "Dönem"
+
+    if not weekly.empty:
+        weekly["Pazar Kaynağı"] = weekly.apply(
+            lambda r: (
+                pazar_kaynak.get(
+                    (
+                        r["Sicil No"],
+                        int(r["Hafta"].split("-H")[0]),
+                        int(r["Hafta"].split("-H")[1]),
+                    ),
+                    "",
+                )
+                if r["Pazar Durumu"] == "Kesildi"
+                else ""
+            ),
+            axis=1,
+        )
+    else:
+        weekly["Pazar Kaynağı"] = pd.Series(dtype=str)
+
     identity = ["sicilno", "Personel", "Firma", "Bölüm", "Pozisyon", "Görev", "Yaka"]
     employee_info = daily.sort_values("Tarih").groupby("sicilno", as_index=False)[identity[1:]].first()
     daily["Ay Günü"] = daily["Tarih"].dt.day
@@ -674,8 +745,12 @@ def create_excel_report(result: ReportResult) -> bytes:
     for row in monthly_ws.iter_rows(min_row=2, min_col=8):
         for cell in row:
             cell.alignment = Alignment(horizontal="center")
-            if cell.value in EXCEL_CODE_COLORS:
-                cell.fill = PatternFill("solid", fgColor=EXCEL_CODE_COLORS[cell.value])
+            raw = cell.value
+            if raw == "Z*":
+                cell.value = "Z"
+                cell.fill = PatternFill("solid", fgColor=EXCEL_CODE_COLORS["Z*"])
+            elif raw in EXCEL_CODE_COLORS:
+                cell.fill = PatternFill("solid", fgColor=EXCEL_CODE_COLORS[raw])
 
     summary = result.summary.copy()
     weekly = result.weekly.copy()

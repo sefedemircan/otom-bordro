@@ -1,5 +1,6 @@
 from datetime import time
 from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
 from openpyxl import Workbook
@@ -192,8 +193,9 @@ def test_context_june_absence_cuts_july_sunday():
     frame = july_week_with_june_context(june_absent=True)
     result = build_report(frame, 2026, 7)
 
-    assert result.monthly.loc[0, "05 Pz"] == "Z"
+    assert result.monthly.loc[0, "05 Pz"] == "Z*"
     assert result.weekly.loc[0, "Pazar Durumu"] == "Kesildi"
+    assert result.weekly.loc[0, "Pazar Kaynağı"] == "Bağlam"
     # Detayda yalnızca Temmuz; Haziran bağlam satırları dönem dışına düşer
     assert result.daily["Tarih"].dt.month.eq(7).all()
     assert len(result.daily) == 5
@@ -211,3 +213,16 @@ def test_context_june_protected_leave_keeps_july_sunday():
     assert result.monthly.loc[0, "04 Ct"] == "A3"
     assert float(result.summary.loc[0, "Normal Çalışma"]) == 27.0
     assert int(result.summary.loc[0, "Yıllık İzin (gün)"]) == 0
+
+
+def test_download_81_june_context_absence_burns_first_july_sunday():
+    """Temmuz 2026: ISO hafta 29–30 Haz + 1–5 Tem; 30 Haz devamsızlık pazarı keser."""
+    fixture = Path(__file__).resolve().parent / "fixtures" / "download_81_test.csv"
+    source = read_puantaj_file(fixture, fixture.name)
+    result = build_report(source, 2026, 7)
+
+    assert result.monthly.loc[0, "05 Pz"] == "Z*"
+    first_week = result.weekly[result.weekly["Hafta"].eq("2026-H27")].iloc[0]
+    assert first_week["Pazar Durumu"] == "Kesildi"
+    assert first_week["Pazar Kaynağı"] == "Bağlam"
+    assert result.daily["Tarih"].dt.month.eq(7).all()
