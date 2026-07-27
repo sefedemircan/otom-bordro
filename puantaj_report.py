@@ -241,6 +241,19 @@ def _source_status_from_code(raw_code: object) -> str | None:
     }.get(normalized)
 
 
+def _devamsizlik_hours(row: pd.Series) -> float:
+    """Meyer'de mazeretsiz devamsızlık EM veya MS ile gelir; ikisi de yoksa tam gün sayılır."""
+    if row["Durum"] != "DEVAMSIZ":
+        return 0.0
+    em = float(row.get("EM_h", 0) or 0)
+    ms = float(row.get("MS_h", 0) or 0)
+    if em >= FULL_DAY_HOURS - 0.01:
+        return em
+    if ms > 0:
+        return ms
+    return FULL_DAY_HOURS
+
+
 def _classify_row(row: pd.Series) -> str:
     source_status = _source_status_from_code(row.get("Kaynak Kod", ""))
     if source_status:
@@ -487,9 +500,7 @@ def prepare_daily(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
         source_burned = bool(work.loc[sunday_idx, "Durum"].eq("UCRETSIZ_HAFTA_TATILI").any())
         # Yalnızca mazeretsiz/devamsızlık keser; rapor, ücretli izin, resmi tatil vb. çalışılmış sayılır.
         weekday_slice = work.loc[weekday_idx]
-        unprotected = weekday_slice["Durum"].eq("DEVAMSIZ") & (
-            weekday_slice["EM_h"].fillna(0) >= FULL_DAY_HOURS - 0.01
-        )
+        unprotected = weekday_slice.apply(_devamsizlik_hours, axis=1) >= FULL_DAY_HOURS - 0.01
         # Korunan durumlar açıkça dışlanır (ileride sınıflama değişirse güvence).
         protected = weekday_slice["Durum"].isin(SUNDAY_PROTECTING_STATUSES)
         full_absence = source_burned or bool((unprotected & ~protected).any())
