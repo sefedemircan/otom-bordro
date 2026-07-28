@@ -42,6 +42,8 @@ def query_chat(request: ChatMessageRequest) -> ChatMessageResponse:
         result = ask_question(
             request.upload_id,
             request.question,
+            year=request.year,
+            month=request.month,
             session_id=request.session_id,
             row_limit=request.row_limit,
         )

@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any
 from urllib import error, request
 
+from api.services.report_snapshots import get_report_run
 from api.services.supabase import SupabaseClient, SupabaseError
 from api.services.uploads import get_upload
 
@@ -16,6 +17,11 @@ _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _DEFAULT_MODEL = "google/gemma-4-31b-it"
 _DEFAULT_ROW_LIMIT = 100
 _MAX_ROW_LIMIT = 200
+_ALLOWED_VIEWS = (
+    "payroll_report_summary_view",
+    "payroll_report_weekly_view",
+    "payroll_report_daily_view",
+)
 
 
 class OpenRouterError(RuntimeError):
@@ -88,22 +94,28 @@ def _validate_sql(sql: str, row_limit: int) -> str:
         flags=re.IGNORECASE,
     ):
         raise OpenRouterError("Sorguda yasaklı anahtar kelime tespit edildi.")
-    if not re.search(r"\b(from|join)\s+(public\.)?payroll_query_view\b", normalized, flags=re.IGNORECASE):
-        raise OpenRouterError("SQL yalnızca payroll_query_view üzerinden sorgu yapmalıdır.")
+    if not re.search(
+        r"\b(from|join)\s+(public\.)?payroll_report_(summary|weekly|daily)_view\b",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
+        raise OpenRouterError(
+            "SQL yalnızca payroll_report_summary_view, payroll_report_weekly_view "
+            "veya payroll_report_daily_view üzerinden sorgu yapmalıdır."
+        )
     if not re.search(r"\blimit\s+\d+\b", normalized, flags=re.IGNORECASE):
         normalized = f"{normalized} LIMIT {row_limit}"
     return normalized
 
 
-def _build_sql_prompt(question: str, upload: dict[str, Any], row_limit: int) -> list[dict[str, str]]:
-    metadata = upload.get("metadata") or {}
-    columns = metadata.get("columns") or []
+def _build_sql_prompt(question: str, run: dict[str, Any], row_limit: int) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
             "content": (
-                "You generate safe PostgreSQL SELECT statements for payroll analytics. "
-                "Only query public.payroll_query_view. Never use semicolons. "
+                "You generate safe PostgreSQL SELECT statements for monthly payroll report analytics. "
+                "Only query these views: payroll_report_summary_view, payroll_report_weekly_view, "
+                "payroll_report_daily_view. Never use semicolons. "
                 f"Always keep LIMIT <= {row_limit}. Return JSON only with keys sql and title."
             ),
         },
@@ -112,17 +124,26 @@ def _build_sql_prompt(question: str, upload: dict[str, Any], row_limit: int) -> 
             "content": (
                 "Kullanici sorusu:\n"
                 f"{question}\n\n"
-                "Kullanabilecegin tablo: public.payroll_query_view\n"
-                "Kolonlar:\n"
-                "upload_id, row_index, sicilno, ad, soyad, personel, firma, bolum, pozisyon, "
-                "mesaitarih, row_year, row_month, ms, nm, fm, izs, yizs, sgkizs, uczizs, rm, em, "
-                "row_data, filename, source_type, created_at, expires_at\n\n"
-                f"Yuklenen dosyanin kolonlari: {columns}\n"
+                f"Aktif rapor donemi: {run.get('label')} (year={run.get('year')}, month={run.get('month')})\n"
+                f"Personel sayisi: {run.get('employee_count')}, gunluk kayit: {run.get('record_count')}\n"
+                f"Toplam NM: {run.get('total_nm')}, Toplam FM: {run.get('total_fm')}\n\n"
+                "Kullanabilecegin view'lar:\n"
+                "1) public.payroll_report_summary_view\n"
+                "   Kolonlar: run_id, upload_id, year, month, period_label, sicil_no, personel, firma, bolum, "
+                "pozisyon, calisma_gunu, normal_calisma, fazla_mesai, fm_nm_aktarim, yillik_izin_gun, "
+                "ucretli_izin_gun, rapor_gun, ucretsiz_izin_gun, devamsizlik_gun, hafta_tatili_gun, "
+                "pazar_kesintisi, row_data\n"
+                "2) public.payroll_report_weekly_view\n"
+                "   Kolonlar: run_id, upload_id, year, month, period_label, sicil_no, personel, hafta, "
+                "normal_calisma, fazla_mesai, fm_nm_aktarim, pazar_durumu, row_data\n"
+                "3) public.payroll_report_daily_view\n"
+                "   Kolonlar: run_id, upload_id, year, month, period_label, sicil_no, personel, firma, bolum, "
+                "pozisyon, tarih, kod, durum_aciklamasi, pazar_durumu, nm_guncel, fm_guncel, row_data\n\n"
                 "Kurallar:\n"
                 "- Sadece SELECT veya WITH kullan.\n"
-                "- Sadece payroll_query_view uzerinden sorgula.\n"
-                "- Toplamlar icin SUM/COUNT/AVG kullan.\n"
-                "- Tarih bazli gruplamada mesaitarih kolonunu kullan.\n"
+                "- Personel ozeti / toplam / ranking sorulari icin summary_view kullan.\n"
+                "- Haftalik kontrol icin weekly_view, gun bazli detay icin daily_view kullan.\n"
+                "- Saat alanlari numeric'tir (ornegin normal_calisma, fazla_mesai).\n"
                 f"- LIMIT en fazla {row_limit} olsun.\n"
                 'JSON disinda hicbir sey donme. Ornek: {"sql":"SELECT ...","title":"Kisa baslik"}'
             ),
@@ -139,9 +160,10 @@ def _summarize_answer(question: str, sql: str, rows: list[dict[str, Any]]) -> st
             {
                 "role": "system",
                 "content": (
-                    "Sen Turkce yanit veren bordro veri asistansin. "
+                    "Sen Turkce yanit veren bordro rapor asistansin. "
                     "Kisa, net ve dogrudan cevap ver. Sonucu uydurma. "
-                    "Sayisal degerlerden bahsederken tablo sonucuna dayan."
+                    "Sayisal degerlerden bahsederken tablo sonucuna dayan. "
+                    "Saat degerlerini saat cinsinden net soyle."
                 ),
             },
             {
@@ -196,8 +218,17 @@ def get_session(session_id: str) -> dict[str, Any]:
     return session
 
 
-def ask_question(upload_id: str, question: str, *, session_id: str | None = None, row_limit: int = _DEFAULT_ROW_LIMIT) -> dict[str, Any]:
-    upload = get_upload(upload_id, touch=True)
+def ask_question(
+    upload_id: str,
+    question: str,
+    *,
+    year: int,
+    month: int,
+    session_id: str | None = None,
+    row_limit: int = _DEFAULT_ROW_LIMIT,
+) -> dict[str, Any]:
+    get_upload(upload_id, touch=True)
+    run = get_report_run(upload_id, year, month)
     row_limit = max(1, min(row_limit, _MAX_ROW_LIMIT))
     client = SupabaseClient.from_env()
     session = get_session(session_id) if session_id else None
@@ -206,7 +237,7 @@ def ask_question(upload_id: str, question: str, *, session_id: str | None = None
     if not session:
         session = _create_session(upload_id, question[:80].strip())
 
-    sql_payload = _extract_json_object(_post_openrouter(_build_sql_prompt(question, upload, row_limit)))
+    sql_payload = _extract_json_object(_post_openrouter(_build_sql_prompt(question, run, row_limit)))
     sql = _validate_sql(str(sql_payload.get("sql") or ""), row_limit)
     rows = client.rpc(
         "execute_payroll_query",
@@ -214,6 +245,8 @@ def ask_question(upload_id: str, question: str, *, session_id: str | None = None
             "p_upload_id": upload_id,
             "p_sql": sql,
             "p_limit": row_limit,
+            "p_year": year,
+            "p_month": month,
         },
     )
     if not isinstance(rows, list):
@@ -260,4 +293,3 @@ def ask_question(upload_id: str, question: str, *, session_id: str | None = None
         "sql": sql,
         "rows": rows,
     }
-

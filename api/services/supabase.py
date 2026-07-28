@@ -158,6 +158,20 @@ class SupabaseClient:
             raise SupabaseError(f"{table} update sonucu beklenmeyen formatta döndü.")
         return data
 
+    def delete_rows(
+        self,
+        table: str,
+        *,
+        filters: dict[str, tuple[str, Any]],
+        returning: str = "minimal",
+    ) -> Any:
+        return self._request(
+            "DELETE",
+            f"/rest/v1/{table}",
+            query={key: f"{operator}.{_encode_filter_value(value)}" for key, (operator, value) in filters.items()},
+            prefer=f"return={returning}",
+        )
+
     def rpc(self, function_name: str, payload: dict[str, Any]) -> Any:
         return self._request("POST", f"/rest/v1/rpc/{function_name}", body=payload)
 

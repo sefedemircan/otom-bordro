@@ -225,3 +225,158 @@ $$;
 
 revoke all on function public.cleanup_expired_payroll_uploads() from public, anon, authenticated;
 grant execute on function public.cleanup_expired_payroll_uploads() to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Monthly report snapshots (AI queries these, not raw Meyer rows)
+-- ---------------------------------------------------------------------------
+
+create table if not exists public.payroll_report_runs (
+  id uuid primary key default gen_random_uuid(),
+  upload_id uuid not null references public.payroll_uploads(id) on delete cascade,
+  year integer not null check (year >= 2000),
+  month integer not null check (month between 1 and 12),
+  label text not null,
+  period_start date,
+  period_end date,
+  employee_count integer not null default 0,
+  record_count integer not null default 0,
+  total_nm numeric(14,2) not null default 0,
+  total_fm numeric(14,2) not null default 0,
+  meta jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null default (now() + interval '24 hours'),
+  unique (upload_id, year, month)
+);
+
+create table if not exists public.payroll_report_rows (
+  id bigint generated always as identity primary key,
+  run_id uuid not null references public.payroll_report_runs(id) on delete cascade,
+  upload_id uuid not null references public.payroll_uploads(id) on delete cascade,
+  dataset text not null check (dataset in ('summary', 'weekly', 'daily', 'monthly')),
+  row_index integer not null check (row_index >= 0),
+  sicil_no text,
+  personel text,
+  firma text,
+  bolum text,
+  pozisyon text,
+  calisma_gunu integer,
+  normal_calisma numeric(14,2),
+  fazla_mesai numeric(14,2),
+  fm_nm_aktarim numeric(14,2),
+  yillik_izin_gun integer,
+  ucretli_izin_gun integer,
+  rapor_gun integer,
+  ucretsiz_izin_gun integer,
+  devamsizlik_gun integer,
+  hafta_tatili_gun integer,
+  pazar_kesintisi integer,
+  hafta text,
+  tarih date,
+  kod text,
+  durum_aciklamasi text,
+  pazar_durumu text,
+  nm_guncel numeric(14,2),
+  fm_guncel numeric(14,2),
+  row_data jsonb not null,
+  created_at timestamptz not null default now(),
+  unique (run_id, dataset, row_index)
+);
+
+create or replace view public.payroll_report_summary_view
+with (security_invoker = true) as
+select
+  r.run_id, r.upload_id, rr.year, rr.month, rr.label as period_label,
+  r.sicil_no, r.personel, r.firma, r.bolum, r.pozisyon,
+  r.calisma_gunu, r.normal_calisma, r.fazla_mesai, r.fm_nm_aktarim,
+  r.yillik_izin_gun, r.ucretli_izin_gun, r.rapor_gun, r.ucretsiz_izin_gun,
+  r.devamsizlik_gun, r.hafta_tatili_gun, r.pazar_kesintisi, r.row_data
+from public.payroll_report_rows r
+join public.payroll_report_runs rr on rr.id = r.run_id
+where r.dataset = 'summary'
+  and r.run_id = public.current_payroll_run_id();
+
+create or replace view public.payroll_report_weekly_view
+with (security_invoker = true) as
+select
+  r.run_id, r.upload_id, rr.year, rr.month, rr.label as period_label,
+  r.sicil_no, r.personel, r.hafta, r.normal_calisma, r.fazla_mesai,
+  r.fm_nm_aktarim, r.pazar_durumu, r.row_data
+from public.payroll_report_rows r
+join public.payroll_report_runs rr on rr.id = r.run_id
+where r.dataset = 'weekly'
+  and r.run_id = public.current_payroll_run_id();
+
+create or replace view public.payroll_report_daily_view
+with (security_invoker = true) as
+select
+  r.run_id, r.upload_id, rr.year, rr.month, rr.label as period_label,
+  r.sicil_no, r.personel, r.firma, r.bolum, r.pozisyon, r.tarih, r.kod,
+  r.durum_aciklamasi, r.pazar_durumu, r.nm_guncel, r.fm_guncel, r.row_data
+from public.payroll_report_rows r
+join public.payroll_report_runs rr on rr.id = r.run_id
+where r.dataset = 'daily'
+  and r.run_id = public.current_payroll_run_id();
+
+-- Preferred RPC signature for AI (year/month required)
+create or replace function public.execute_payroll_query(
+  p_upload_id uuid,
+  p_sql text,
+  p_limit integer default 200,
+  p_year integer default null,
+  p_month integer default null
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions, pg_temp
+as $$
+declare
+  normalized_sql text;
+  limited_sql text;
+  effective_limit integer := greatest(1, least(coalesce(p_limit, 200), 200));
+  payload jsonb;
+  run_uuid uuid;
+begin
+  if p_upload_id is null then
+    raise exception 'upload_id is required';
+  end if;
+  if p_year is null or p_month is null then
+    raise exception 'year and month are required for report queries';
+  end if;
+
+  select id into run_uuid
+  from public.payroll_report_runs
+  where upload_id = p_upload_id and year = p_year and month = p_month
+  order by created_at desc
+  limit 1;
+
+  if run_uuid is null then
+    raise exception 'report snapshot not found for upload/period';
+  end if;
+
+  normalized_sql := trim(coalesce(p_sql, ''));
+  normalized_sql := regexp_replace(normalized_sql, '\s+', ' ', 'g');
+  if normalized_sql ~ ';' then raise exception 'multiple statements are not allowed'; end if;
+  if normalized_sql !~* '^(select|with) ' then raise exception 'only SELECT queries are allowed'; end if;
+  if normalized_sql ~* '\m(insert|update|delete|drop|alter|create|grant|revoke|truncate|call|copy|comment|vacuum|analyze|refresh|merge)\M' then
+    raise exception 'forbidden keyword detected';
+  end if;
+  if normalized_sql !~* '\m(from|join)\M\s+(public\.)?payroll_report_(summary|weekly|daily)_view\M' then
+    raise exception 'queries must target payroll_report_summary_view, payroll_report_weekly_view or payroll_report_daily_view';
+  end if;
+
+  perform set_config('statement_timeout', '4000', true);
+  perform set_config('app.current_payroll_run_id', run_uuid::text, true);
+
+  limited_sql := format(
+    'with query_result as (%s) select coalesce(jsonb_agg(row_to_json(query_result)), ''[]''::jsonb) from (select * from query_result limit %s) query_result',
+    normalized_sql,
+    effective_limit
+  );
+  execute limited_sql into payload;
+  return coalesce(payload, '[]'::jsonb);
+end;
+$$;
+
+revoke all on function public.execute_payroll_query(uuid, text, integer, integer, integer) from public, anon, authenticated;
+grant execute on function public.execute_payroll_query(uuid, text, integer, integer, integer) to service_role;

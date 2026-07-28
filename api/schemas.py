@@ -177,6 +177,8 @@ class ChatSessionDetail(BaseModel):
 class ChatMessageRequest(BaseModel):
     upload_id: str
     question: str = Field(..., min_length=1)
+    year: int = Field(..., ge=2000, le=2100)
+    month: int = Field(..., ge=1, le=12)
     session_id: str | None = None
     row_limit: int = Field(default=100, ge=1, le=200)
 

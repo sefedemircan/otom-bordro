@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal
+import re
 
 from api.deps import dataframe_to_records, load_calc_dataframe, load_report_dataframe, rows_to_dataframe
 from api.services.supabase import SupabaseClient, SupabaseError
@@ -31,6 +32,13 @@ def _safe_float(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     text = str(value).strip().replace(",", ".")
+    # Meyer hour fields often arrive as HH:MM or HH:MM:SS.
+    if re.fullmatch(r"\d{1,3}:\d{2}(:\d{2})?", text):
+        parts = [int(part) for part in text.split(":")]
+        hours = parts[0]
+        minutes = parts[1] if len(parts) > 1 else 0
+        seconds = parts[2] if len(parts) > 2 else 0
+        return hours + (minutes / 60.0) + (seconds / 3600.0)
     try:
         return float(text)
     except ValueError:

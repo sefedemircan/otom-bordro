@@ -13,6 +13,7 @@ from api.deps import (
     read_upload_bytes,
 )
 from api.schemas import PeriodItem, PeriodsResponse, ReportBuildResponse, ReportMeta
+from api.services.report_snapshots import persist_report_snapshot
 from api.services.supabase import SupabaseError
 from api.services.uploads import load_upload_dataframe
 from puantaj_report import (
@@ -111,6 +112,11 @@ async def build_monthly_report(
         total_nm_fmt=format_hours(total_nm),
         total_fm_fmt=format_hours(total_fm),
     )
+    if upload_id:
+        try:
+            persist_report_snapshot(upload_id, year, month, result)
+        except SupabaseError as exc:
+            raise api_error(500, "REPORT_STORE_ERROR", str(exc)) from exc
     return ReportBuildResponse(
         meta=meta,
         quality=dataframe_to_records(result.quality),
