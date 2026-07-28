@@ -1,6 +1,6 @@
 # Meyer – Canias Entegrasyon Toplantısı Hazırlığı
 
-## 1. Projenin kısa tanımı
+## 1. Projenin kısa tanımı.
 
 Bu proje, Meyer PDKS’den Excel/CSV olarak dışa aktarılan puantaj verilerini yükleyip personel bazında bordroya hazırlanan çalışma süresine dönüştüren bir Streamlit uygulamasıdır. Uygulama; ham puantajı okur, izin ve rapor kodlarını yorumlar, eksik çalışma sürelerini hesaplar, haftalık 45 saat kuralını uygular ve günlük/haftalık özetler üretir.
 
