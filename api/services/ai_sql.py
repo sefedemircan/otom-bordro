@@ -261,6 +261,8 @@ def ask_question(
                 "session_id": session["id"],
                 "role": "user",
                 "content": question,
+                "sql_text": None,
+                "result_rows": None,
                 "created_at": now,
             },
             {
