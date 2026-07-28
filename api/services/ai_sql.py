@@ -163,16 +163,16 @@ def _summarize_answer(question: str, sql: str, rows: list[dict[str, Any]]) -> st
                     "Sen Turkce yanit veren bordro rapor asistansin. "
                     "Kisa, net ve dogrudan cevap ver. Sonucu uydurma. "
                     "Sayisal degerlerden bahsederken tablo sonucuna dayan. "
-                    "Saat degerlerini saat cinsinden net soyle."
+                    "Saat degerlerini mumkunse HH:MM formatinda da yaz (ornegin 0.7 saat = 0:42). "
+                    "Yanitta SQL, tablo adi veya teknik detay gosterme."
                 ),
             },
             {
                 "role": "user",
                 "content": (
                     f"Soru: {question}\n"
-                    f"Calistirilan SQL: {sql}\n"
                     f"Ilk sonuc kayitlari: {preview}\n"
-                    "Buna gore Turkce cevap ver."
+                    "Buna gore sadece kullaniciya donuk Turkce cevap ver. SQL yazma."
                 ),
             },
         ],

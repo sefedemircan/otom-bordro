@@ -155,6 +155,18 @@ def create_upload(
             "metadata": metadata,
         },
     )
+
+    # Report uploads: persist only monthly report outputs (not raw Meyer rows).
+    if source_type == "report":
+        from api.services.report_snapshots import persist_report_snapshot
+        from puantaj_report import build_report
+
+        for year, month in available_periods(df):
+            result = build_report(df, year, month)
+            persist_report_snapshot(upload["id"], year, month, result)
+        return upload
+
+    # Calc uploads still keep normalized rows for employee-level compute.
     normalized_rows = [_normalize_row(upload["id"], idx, row) for idx, row in enumerate(records)]
     for chunk in _chunked(normalized_rows):
         client.insert_rows("payroll_upload_rows", chunk)

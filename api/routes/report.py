@@ -13,9 +13,13 @@ from api.deps import (
     read_upload_bytes,
 )
 from api.schemas import PeriodItem, PeriodsResponse, ReportBuildResponse, ReportMeta
-from api.services.report_snapshots import persist_report_snapshot
+from api.services.report_snapshots import (
+    load_report_response_from_snapshot,
+    load_report_result_from_snapshot,
+    persist_report_snapshot,
+)
 from api.services.supabase import SupabaseError
-from api.services.uploads import load_upload_dataframe
+from api.services.uploads import get_upload, load_upload_dataframe
 from puantaj_report import (
     available_periods,
     build_report,
@@ -36,6 +40,19 @@ async def list_periods(
     upload_id: str | None = Form(default=None),
 ) -> PeriodsResponse:
     if upload_id:
+        try:
+            upload = get_upload(upload_id, "report", touch=True)
+        except SupabaseError as exc:
+            raise api_error(404, "UPLOAD_NOT_FOUND", str(exc)) from exc
+        metadata = upload.get("metadata") or {}
+        periods = metadata.get("periods") or []
+        if periods:
+            return PeriodsResponse(
+                periods=[
+                    PeriodItem(year=int(item["year"]), month=int(item["month"]), label=str(item["label"]))
+                    for item in periods
+                ]
+            )
         try:
             _, df = load_upload_dataframe(upload_id, "report")
         except SupabaseError as exc:
@@ -65,16 +82,24 @@ async def build_monthly_report(
 ) -> ReportBuildResponse:
     if not (1 <= month <= 12):
         raise api_error(400, "INVALID_PERIOD", "month 1–12 arasında olmalıdır.")
+
+    # Preferred path: serve already-computed report snapshot for this upload/period.
     if upload_id:
         try:
-            _, df = load_upload_dataframe(upload_id, "report")
-        except SupabaseError as exc:
-            raise api_error(404, "UPLOAD_NOT_FOUND", str(exc)) from exc
+            payload = load_report_response_from_snapshot(upload_id, year, month)
+            return ReportBuildResponse(**payload)
+        except SupabaseError:
+            # Fallback for older uploads that still have raw rows.
+            try:
+                _, df = load_upload_dataframe(upload_id, "report")
+            except SupabaseError as exc:
+                raise api_error(404, "UPLOAD_NOT_FOUND", str(exc)) from exc
     else:
         if file is None:
             raise api_error(400, "INVALID_FILE", "file veya upload_id gönderilmelidir.")
         data, filename = await read_upload_bytes(file)
         df = load_report_dataframe(data, filename)
+
     try:
         result = build_report(df, year, month)
     except ValueError as exc:
@@ -136,25 +161,41 @@ async def download_excel_report(
 ) -> Response:
     if not (1 <= month <= 12):
         raise api_error(400, "INVALID_PERIOD", "month 1–12 arasında olmalıdır.")
+
     if upload_id:
         try:
-            _, df = load_upload_dataframe(upload_id, "report")
-        except SupabaseError as exc:
-            raise api_error(404, "UPLOAD_NOT_FOUND", str(exc)) from exc
+            result = load_report_result_from_snapshot(upload_id, year, month)
+            report_bytes = create_excel_report(result)
+        except SupabaseError:
+            try:
+                _, df = load_upload_dataframe(upload_id, "report")
+            except SupabaseError as exc:
+                raise api_error(404, "UPLOAD_NOT_FOUND", str(exc)) from exc
+            try:
+                result = build_report(df, year, month)
+                report_bytes = create_excel_report(result)
+            except ValueError as exc:
+                message = str(exc)
+                code = "MISSING_COLUMNS" if "Zorunlu sütunlar" in message else "INVALID_PERIOD"
+                if "bulunamadı" in message.lower():
+                    code = "NO_PERIODS"
+                raise api_error(400, code, message) from exc
+        except ValueError as exc:
+            raise api_error(400, "INVALID_PERIOD", str(exc)) from exc
     else:
         if file is None:
             raise api_error(400, "INVALID_FILE", "file veya upload_id gönderilmelidir.")
         data, filename = await read_upload_bytes(file)
         df = load_report_dataframe(data, filename)
-    try:
-        result = build_report(df, year, month)
-        report_bytes = create_excel_report(result)
-    except ValueError as exc:
-        message = str(exc)
-        code = "MISSING_COLUMNS" if "Zorunlu sütunlar" in message else "INVALID_PERIOD"
-        if "bulunamadı" in message.lower():
-            code = "NO_PERIODS"
-        raise api_error(400, code, message) from exc
+        try:
+            result = build_report(df, year, month)
+            report_bytes = create_excel_report(result)
+        except ValueError as exc:
+            message = str(exc)
+            code = "MISSING_COLUMNS" if "Zorunlu sütunlar" in message else "INVALID_PERIOD"
+            if "bulunamadı" in message.lower():
+                code = "NO_PERIODS"
+            raise api_error(400, code, message) from exc
 
     out_name = f"Aylik_Puantaj_Raporu_{year}_{month:02d}.xlsx"
     return Response(

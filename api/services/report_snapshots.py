@@ -261,3 +261,71 @@ def get_report_run(upload_id: str, year: int, month: int) -> dict[str, Any]:
             f"Bu dönem için rapor snapshot bulunamadı ({month:02d}.{year}). Önce raporu oluşturun."
         )
     return run
+
+
+def _dataset_records(run_id: str, dataset: str) -> list[dict[str, Any]]:
+    client = SupabaseClient.from_env()
+    rows = client.select_rows(
+        "payroll_report_rows",
+        columns="row_data",
+        filters={
+            "run_id": ("eq", run_id),
+            "dataset": ("eq", dataset),
+        },
+        order="row_index.asc",
+    )
+    return [row["row_data"] for row in rows if isinstance(row.get("row_data"), dict)]
+
+
+def load_report_result_from_snapshot(upload_id: str, year: int, month: int) -> ReportResult:
+    import pandas as pd
+
+    run = get_report_run(upload_id, year, month)
+    run_id = run["id"]
+    daily = pd.DataFrame(_dataset_records(run_id, "daily"))
+    monthly = pd.DataFrame(_dataset_records(run_id, "monthly"))
+    summary = pd.DataFrame(_dataset_records(run_id, "summary"))
+    weekly = pd.DataFrame(_dataset_records(run_id, "weekly"))
+    quality = pd.DataFrame()
+    period_start = pd.Timestamp(run["period_start"])
+    period_end = pd.Timestamp(run["period_end"])
+    return ReportResult(daily, monthly, summary, weekly, quality, period_start, period_end)
+
+
+def load_report_response_from_snapshot(upload_id: str, year: int, month: int) -> dict[str, Any]:
+    from api.deps import format_hour_columns
+
+    result = load_report_result_from_snapshot(upload_id, year, month)
+    summary = format_hour_columns(
+        result.summary,
+        ["Normal Çalışma", "Fazla Mesai", "FM→NM Aktarım"],
+    )
+    weekly = format_hour_columns(
+        result.weekly,
+        ["Hafta İçi NM", "Hafta Sonu Ham FM", "FM→NM Aktarım", "Toplam NM", "Kalan FM"],
+    )
+    daily = result.daily.copy()
+    hour_cols = [c for c in daily.columns if str(c).endswith("_h")]
+    daily = format_hour_columns(daily, hour_cols)
+    total_nm = float(result.summary["Normal Çalışma"].sum()) if not result.summary.empty else 0.0
+    total_fm = float(result.summary["Fazla Mesai"].sum()) if not result.summary.empty else 0.0
+    return {
+        "meta": {
+            "year": year,
+            "month": month,
+            "label": f"{month:02d}.{year}",
+            "period_start": result.period_start.strftime("%d.%m.%Y"),
+            "period_end": result.period_end.strftime("%d.%m.%Y"),
+            "employee_count": len(result.summary),
+            "record_count": len(result.daily),
+            "total_nm": total_nm,
+            "total_fm": total_fm,
+            "total_nm_fmt": format_hours(total_nm),
+            "total_fm_fmt": format_hours(total_fm),
+        },
+        "quality": dataframe_to_records(result.quality),
+        "monthly": dataframe_to_records(result.monthly),
+        "summary": dataframe_to_records(summary),
+        "weekly": dataframe_to_records(weekly),
+        "daily": dataframe_to_records(daily),
+    }
