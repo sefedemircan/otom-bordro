@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, File, Request, UploadFile
+from fastapi import APIRouter, File, Form, Request, UploadFile
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from api.deps import (
@@ -16,6 +16,8 @@ from api.deps import (
     rows_to_dataframe,
 )
 from api.schemas import ComputeJsonRequest, ComputeResponse, InspectResponse
+from api.services.supabase import SupabaseError
+from api.services.uploads import load_upload_dataframe
 from puantaj_calc import (
     build_employee_list,
     calculate_puantaj,
@@ -86,9 +88,20 @@ def _compute_payload(
 
 
 @router.post("/inspect", response_model=InspectResponse)
-async def inspect_file(file: UploadFile = File(...)) -> InspectResponse:
-    data, filename = await read_upload_bytes(file)
-    df = load_calc_dataframe(data, filename)
+async def inspect_file(
+    file: UploadFile | None = File(default=None),
+    upload_id: str | None = Form(default=None),
+) -> InspectResponse:
+    if upload_id:
+        try:
+            _, df = load_upload_dataframe(upload_id, "calc")
+        except SupabaseError as exc:
+            raise api_error(404, "UPLOAD_NOT_FOUND", str(exc)) from exc
+    else:
+        if file is None:
+            raise api_error(400, "INVALID_FILE", "file veya upload_id gönderilmelidir.")
+        data, filename = await read_upload_bytes(file)
+        df = load_calc_dataframe(data, filename)
     bulk = is_bulk_file(df)
     employees: list[dict[str, Any]] = []
     if bulk or ("sicilno" in df.columns and df["sicilno"].notna().any()):
@@ -123,20 +136,26 @@ async def compute(request: Request) -> ComputeResponse:
 
     form = await request.form()
     upload = form.get("file")
-    if upload is None or not isinstance(upload, (UploadFile, StarletteUploadFile)):
-        raise api_error(
-            400,
-            "INVALID_FILE",
-            "multipart/form-data ile `file` gönderin veya application/json ile `rows` gönderin.",
-        )
-
     sicil_raw = form.get("sicilno")
+    upload_id_raw = form.get("upload_id")
+    upload_id = str(upload_id_raw).strip() if upload_id_raw not in (None, "") else None
     sicilno = str(sicil_raw).strip() if sicil_raw not in (None, "") else None
     year = _parse_optional_int(form.get("year"))
     month = _parse_optional_int(form.get("month"))
-
-    data, filename = await read_upload_bytes(upload)  # type: ignore[arg-type]
-    master_df = load_calc_dataframe(data, filename)
+    if upload_id:
+        try:
+            _, master_df = load_upload_dataframe(upload_id, "calc")
+        except SupabaseError as exc:
+            raise api_error(404, "UPLOAD_NOT_FOUND", str(exc)) from exc
+    else:
+        if upload is None or not isinstance(upload, (UploadFile, StarletteUploadFile)):
+            raise api_error(
+                400,
+                "INVALID_FILE",
+                "multipart/form-data ile `file` veya `upload_id` gönderin ya da application/json ile `rows` gönderin.",
+            )
+        data, filename = await read_upload_bytes(upload)  # type: ignore[arg-type]
+        master_df = load_calc_dataframe(data, filename)
     bulk = is_bulk_file(master_df)
 
     if bulk:

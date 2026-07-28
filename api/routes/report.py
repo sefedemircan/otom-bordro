@@ -13,6 +13,8 @@ from api.deps import (
     read_upload_bytes,
 )
 from api.schemas import PeriodItem, PeriodsResponse, ReportBuildResponse, ReportMeta
+from api.services.supabase import SupabaseError
+from api.services.uploads import load_upload_dataframe
 from puantaj_report import (
     available_periods,
     build_report,
@@ -28,9 +30,20 @@ def _period_label(year: int, month: int) -> str:
 
 
 @router.post("/periods", response_model=PeriodsResponse)
-async def list_periods(file: UploadFile = File(...)) -> PeriodsResponse:
-    data, filename = await read_upload_bytes(file)
-    df = load_report_dataframe(data, filename)
+async def list_periods(
+    file: UploadFile | None = File(default=None),
+    upload_id: str | None = Form(default=None),
+) -> PeriodsResponse:
+    if upload_id:
+        try:
+            _, df = load_upload_dataframe(upload_id, "report")
+        except SupabaseError as exc:
+            raise api_error(404, "UPLOAD_NOT_FOUND", str(exc)) from exc
+    else:
+        if file is None:
+            raise api_error(400, "INVALID_FILE", "file veya upload_id gönderilmelidir.")
+        data, filename = await read_upload_bytes(file)
+        df = load_report_dataframe(data, filename)
     periods = available_periods(df)
     if not periods:
         raise api_error(400, "NO_PERIODS", "Dosyada geçerli bir mesaitarih alanı bulunamadı.")
@@ -44,14 +57,23 @@ async def list_periods(file: UploadFile = File(...)) -> PeriodsResponse:
 
 @router.post("/build", response_model=ReportBuildResponse)
 async def build_monthly_report(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
     year: int = Form(...),
     month: int = Form(...),
+    upload_id: str | None = Form(default=None),
 ) -> ReportBuildResponse:
     if not (1 <= month <= 12):
         raise api_error(400, "INVALID_PERIOD", "month 1–12 arasında olmalıdır.")
-    data, filename = await read_upload_bytes(file)
-    df = load_report_dataframe(data, filename)
+    if upload_id:
+        try:
+            _, df = load_upload_dataframe(upload_id, "report")
+        except SupabaseError as exc:
+            raise api_error(404, "UPLOAD_NOT_FOUND", str(exc)) from exc
+    else:
+        if file is None:
+            raise api_error(400, "INVALID_FILE", "file veya upload_id gönderilmelidir.")
+        data, filename = await read_upload_bytes(file)
+        df = load_report_dataframe(data, filename)
     try:
         result = build_report(df, year, month)
     except ValueError as exc:
@@ -101,14 +123,23 @@ async def build_monthly_report(
 
 @router.post("/excel")
 async def download_excel_report(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
     year: int = Form(...),
     month: int = Form(...),
+    upload_id: str | None = Form(default=None),
 ) -> Response:
     if not (1 <= month <= 12):
         raise api_error(400, "INVALID_PERIOD", "month 1–12 arasında olmalıdır.")
-    data, filename = await read_upload_bytes(file)
-    df = load_report_dataframe(data, filename)
+    if upload_id:
+        try:
+            _, df = load_upload_dataframe(upload_id, "report")
+        except SupabaseError as exc:
+            raise api_error(404, "UPLOAD_NOT_FOUND", str(exc)) from exc
+    else:
+        if file is None:
+            raise api_error(400, "INVALID_FILE", "file veya upload_id gönderilmelidir.")
+        data, filename = await read_upload_bytes(file)
+        df = load_report_dataframe(data, filename)
     try:
         result = build_report(df, year, month)
         report_bytes = create_excel_report(result)

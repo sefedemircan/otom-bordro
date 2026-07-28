@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -127,3 +127,62 @@ class ReportBuildResponse(BaseModel):
 class ErrorDetail(BaseModel):
     code: str
     message: str
+
+
+class UploadDatasetInfo(BaseModel):
+    id: str
+    source_type: Literal["report", "calc"]
+    filename: str
+    file_size: int
+    row_count: int
+    metadata: dict[str, Any]
+    created_at: str
+    expires_at: str
+
+
+class UploadCreateResponse(BaseModel):
+    upload: UploadDatasetInfo
+
+
+class GeneratedSqlPreview(BaseModel):
+    sql: str
+    row_limit: int
+
+
+class ChatSessionSummary(BaseModel):
+    id: str
+    upload_id: str
+    title: str | None = None
+    updated_at: str
+
+
+class ChatMessageItem(BaseModel):
+    id: str
+    role: Literal["user", "assistant"]
+    content: str
+    sql_text: str | None = None
+    result_rows: list[dict[str, Any]] | None = None
+    created_at: str
+
+
+class ChatSessionDetail(BaseModel):
+    id: str
+    upload_id: str
+    title: str | None = None
+    created_at: str
+    updated_at: str
+    messages: list[ChatMessageItem]
+
+
+class ChatMessageRequest(BaseModel):
+    upload_id: str
+    question: str = Field(..., min_length=1)
+    session_id: str | None = None
+    row_limit: int = Field(default=100, ge=1, le=200)
+
+
+class ChatMessageResponse(BaseModel):
+    session: ChatSessionDetail
+    answer: str
+    generated_sql: GeneratedSqlPreview
+    rows: list[dict[str, Any]]

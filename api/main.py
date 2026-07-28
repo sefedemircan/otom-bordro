@@ -14,7 +14,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from api.routes import calc, report  # noqa: E402
+from api.routes import calc, chat, report, uploads  # noqa: E402
 from api.schemas import CodeLegendItem, HealthResponse, MetaResponse  # noqa: E402
 from puantaj_calc import (  # noqa: E402
     DAILY_WORK_HOURS,
@@ -49,6 +49,8 @@ app.add_middleware(
 
 app.include_router(calc.router)
 app.include_router(report.router)
+app.include_router(uploads.router)
+app.include_router(chat.router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["meta"])
