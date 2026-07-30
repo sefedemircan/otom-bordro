@@ -736,14 +736,38 @@ def create_excel_report(result: ReportResult) -> bytes:
     wb = Workbook()
     wb.remove(wb.active)
 
+    identity_columns = ["Sicil No", "Personel", "Firma", "Bölüm", "Pozisyon", "Görev", "Yaka"]
+    day_column_pattern = re.compile(r"^(0[1-9]|[12]\d|3[01]) (Pt|Sa|Ça|Pe|Cu|Ct|Pz)$")
+    day_columns = sorted(
+        (column for column in result.monthly.columns if day_column_pattern.fullmatch(str(column))),
+        key=lambda column: int(str(column)[:2]),
+    )
+    other_columns = [
+        column
+        for column in result.monthly.columns
+        if column not in identity_columns and column not in day_columns
+    ]
+    monthly = result.monthly.reindex(
+        columns=[
+            *(column for column in identity_columns if column in result.monthly.columns),
+            *day_columns,
+            *other_columns,
+        ]
+    )
+
     monthly_ws = wb.create_sheet()
-    _write_dataframe(monthly_ws, result.monthly, "Aylık Puantaj", "H2")
-    for cell in monthly_ws[1][7:]:
+    _write_dataframe(monthly_ws, monthly, "Aylık Puantaj", "H2")
+    day_column_indexes = [
+        cell.column for cell in monthly_ws[1] if day_column_pattern.fullmatch(str(cell.value))
+    ]
+    for column_index in day_column_indexes:
+        cell = monthly_ws.cell(1, column_index)
         day_number = int(str(cell.value)[:2])
         if pd.Timestamp(result.period_start.year, result.period_start.month, day_number).dayofweek >= 5:
             cell.fill = PatternFill("solid", fgColor="8A5A00")
-    for row in monthly_ws.iter_rows(min_row=2, min_col=8):
-        for cell in row:
+    for row_index in range(2, monthly_ws.max_row + 1):
+        for column_index in day_column_indexes:
+            cell = monthly_ws.cell(row_index, column_index)
             cell.alignment = Alignment(horizontal="center")
             raw = cell.value
             if raw == "Z*":

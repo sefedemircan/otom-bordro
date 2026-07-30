@@ -3,7 +3,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from puantaj_report import build_report, create_excel_report, read_puantaj_file, time_to_hours
 
@@ -103,6 +103,26 @@ def test_excel_report_is_created():
     data = create_excel_report(build_report(sample_frame(), 2026, 6))
     assert data.startswith(b"PK")
     assert len(data) > 5000
+
+
+def test_excel_report_handles_reordered_snapshot_columns():
+    result = build_report(sample_frame(), 2026, 6)
+    result.monthly = result.monthly[sorted(result.monthly.columns)]
+
+    data = create_excel_report(result)
+    workbook = load_workbook(BytesIO(data))
+    headers = [cell.value for cell in workbook["Aylık Puantaj"][1]]
+
+    assert headers[:8] == [
+        "Sicil No",
+        "Personel",
+        "Firma",
+        "Bölüm",
+        "Pozisyon",
+        "Görev",
+        "Yaka",
+        "01 Pt",
+    ]
 
 
 def test_numeric_file_name_does_not_break_reader(tmp_path):
