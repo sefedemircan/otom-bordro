@@ -786,7 +786,7 @@ def create_excel_report(result: ReportResult) -> bytes:
         weekly[column] = weekly[column].map(format_hours)
     for column in [c for c in detail.columns if c.endswith("_h")]:
         detail[column] = detail[column].map(format_hours)
-    detail["Tarih"] = pd.to_datetime(detail["Tarih"])
+    detail["Tarih"] = pd.to_datetime(detail["Tarih"], format="mixed", dayfirst=True)
 
     for frame, name, freeze in [
         (summary, "Personel Özeti", "A2"),

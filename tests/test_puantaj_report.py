@@ -108,6 +108,7 @@ def test_excel_report_is_created():
 def test_excel_report_handles_reordered_snapshot_columns():
     result = build_report(sample_frame(), 2026, 6)
     result.monthly = result.monthly[sorted(result.monthly.columns)]
+    result.daily["Tarih"] = result.daily["Tarih"].dt.strftime("%d.%m.%Y")
 
     data = create_excel_report(result)
     workbook = load_workbook(BytesIO(data))
