@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import math
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -12,7 +11,7 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from puantaj_report import ReportResult, _column_key, _normalized_text
+from puantaj_report import ReportResult, _column_key, _normalized_text, prepare_daily
 
 
 DAY_SLOT_PATTERN = re.compile(
@@ -28,6 +27,7 @@ class FillStats:
     unmatched_template: list[str] = field(default_factory=list)
     unmatched_source: list[str] = field(default_factory=list)
     filled_cells: int = 0
+    carry_filled: int = 0
     sheet_name: str = ""
     year: int | None = None
     month: int | None = None
@@ -38,6 +38,7 @@ class FillStats:
             "unmatched_template": self.unmatched_template,
             "unmatched_source": self.unmatched_source,
             "filled_cells": self.filled_cells,
+            "carry_filled": self.carry_filled,
             "sheet_name": self.sheet_name,
             "year": self.year,
             "month": self.month,
@@ -59,6 +60,14 @@ def _find_name_column(ws: Worksheet, header_row: int) -> int:
     raise ValueError("Şablonda 'ADI SOYADI' kolonu bulunamadı.")
 
 
+def _find_carry_column(ws: Worksheet, header_row: int) -> int | None:
+    for col in range(1, ws.max_column + 1):
+        key = _column_key(ws.cell(header_row, col).value)
+        if "ONCEKI" in key and "DEVREDEN" in key:
+            return col
+    return None
+
+
 def _sheet_day_slot_count(ws: Worksheet) -> int:
     try:
         header_row = _header_row(ws)
@@ -77,7 +86,6 @@ def detect_puantaj_sheet(wb) -> Worksheet:
         slot_count = _sheet_day_slot_count(ws)
         if slot_count == 0:
             continue
-        # Prefer sheets named like "2026 Puantaj".
         bonus = 100 if "PUANTAJ" in _normalized_text(ws.title) else 0
         candidates.append((slot_count + bonus, ws))
     if not candidates:
@@ -88,7 +96,6 @@ def detect_puantaj_sheet(wb) -> Worksheet:
 
 def _slot_key(value: object) -> tuple[int, int] | None:
     text = _normalized_text(value).replace(" ", "")
-    # Ça → CA after accent strip
     match = DAY_SLOT_PATTERN.fullmatch(text)
     if not match:
         return None
@@ -100,8 +107,8 @@ def _slot_key(value: object) -> tuple[int, int] | None:
     return int(week_text), weekday
 
 
-def resolve_day_columns(ws: Worksheet, year: int, month: int) -> dict[int, int]:
-    """Ay günü (1..N) → Excel kolon index (1-based)."""
+def resolve_week_starts(ws: Worksheet) -> dict[int, int]:
+    """1-based week index → first day-slot column (PtN)."""
     header_row = _header_row(ws)
     week_starts: dict[int, int] = {}
     for col in range(1, ws.max_column + 1):
@@ -113,22 +120,79 @@ def resolve_day_columns(ws: Worksheet, year: int, month: int) -> dict[int, int]:
             week_starts[week_index] = col
         elif week_index not in week_starts:
             week_starts[week_index] = col - weekday
-
     if not week_starts:
         raise ValueError("Şablonda haftalık gün kolonları (Pt1, Sa1, …) bulunamadı.")
+    return week_starts
 
+
+def resolve_day_columns(ws: Worksheet, year: int, month: int) -> dict[int, int]:
+    """Ay günü (1..N) → Excel kolon index.
+
+    Ayın ilk gününün hafta içi konumuna göre hizalanır:
+    Temmuz 2026 Çarşamba başlar → gün 1 = Ça1, Pt1/Sa1 boş kalır.
+    """
+    week_starts = resolve_week_starts(ws)
+    first_weekday = int(pd.Timestamp(year=year, month=month, day=1).dayofweek)
     days_in_month = int(pd.Timestamp(year=year, month=month, day=1).days_in_month)
     mapping: dict[int, int] = {}
     for day in range(1, days_in_month + 1):
-        week_index = math.ceil(day / 7)
-        offset = (day - 1) % 7
+        slot = first_weekday + day - 1
+        week_index_0, weekday = divmod(slot, 7)
+        week_index = week_index_0 + 1
         start = week_starts.get(week_index)
         if start is None:
             continue
-        mapping[day] = start + offset
+        mapping[day] = start + weekday
     if not mapping:
         raise ValueError("Şablon gün kolonları dönem günleriyle eşleştirilemedi.")
     return mapping
+
+
+def _hours_value(row: pd.Series) -> float:
+    for left, right in (
+        ("NM Güncel_h", "FM Güncel_h"),
+        ("NM_h", "FM_h"),
+    ):
+        if left in row.index or right in row.index:
+            return float(row.get(left, 0) or 0) + float(row.get(right, 0) or 0)
+    kod = row.get("Kod")
+    if isinstance(kod, (int, float)) and not pd.isna(kod):
+        return float(kod) if float(kod) > 0 else 0.0
+    return 0.0
+
+
+def compute_carryover_hours(daily_all: pd.DataFrame, year: int, month: int) -> dict[str, float]:
+    """Ayın ilk haftasındaki önceki-ay günlerinin fiili çalışma toplamı."""
+    if daily_all is None or daily_all.empty or "Tarih" not in daily_all.columns:
+        return {}
+    period_start = pd.Timestamp(year=year, month=month, day=1)
+    first_weekday = int(period_start.dayofweek)
+    if first_weekday == 0:
+        return {}
+
+    carry_start = period_start - pd.Timedelta(days=first_weekday)
+    carry_end = period_start - pd.Timedelta(days=1)
+    window = daily_all[
+        (daily_all["Tarih"] >= carry_start) & (daily_all["Tarih"] <= carry_end)
+    ].copy()
+    if window.empty:
+        return {}
+
+    totals: dict[str, float] = {}
+    for _, row in window.iterrows():
+        name = _normalized_text(row.get("Personel", ""))
+        if not name:
+            continue
+        hours = _hours_value(row)
+        if hours <= 0:
+            continue
+        totals[name] = round(totals.get(name, 0.0) + hours, 2)
+    return totals
+
+
+def carryover_hours_from_source(source_df: pd.DataFrame, year: int, month: int) -> dict[str, float]:
+    daily_all, _, _ = prepare_daily(source_df)
+    return compute_carryover_hours(daily_all, year, month)
 
 
 def _cell_value_for_template(raw: object) -> object | None:
@@ -144,7 +208,6 @@ def _cell_value_for_template(raw: object) -> object | None:
         return None
     if text == "Z*":
         return "Z"
-    # Numeric hours stored as string (e.g. "9" / "9,5")
     numeric = text.replace(",", ".")
     try:
         number = float(numeric)
@@ -174,18 +237,33 @@ def monthly_codes_by_person(monthly: pd.DataFrame) -> dict[str, dict[int, object
     return by_person
 
 
+def _all_day_slot_columns(ws: Worksheet) -> list[int]:
+    header_row = _header_row(ws)
+    return [
+        col
+        for col in range(1, ws.max_column + 1)
+        if _slot_key(ws.cell(header_row, col).value)
+    ]
+
+
 def fill_otom_template(
     template_bytes: bytes,
     result: ReportResult,
     year: int,
     month: int,
+    source_df: pd.DataFrame | None = None,
 ) -> tuple[bytes, FillStats]:
     wb = load_workbook(io.BytesIO(template_bytes))
     ws = detect_puantaj_sheet(wb)
     header_row = _header_row(ws)
     name_col = _find_name_column(ws, header_row)
+    carry_col = _find_carry_column(ws, header_row)
+    day_slot_columns = _all_day_slot_columns(ws)
     day_columns = resolve_day_columns(ws, year, month)
     source_by_name = monthly_codes_by_person(result.monthly)
+    carry_by_name = (
+        carryover_hours_from_source(source_df, year, month) if source_df is not None else {}
+    )
     used_source: set[str] = set()
 
     stats = FillStats(sheet_name=ws.title, year=year, month=month)
@@ -201,11 +279,23 @@ def fill_otom_template(
             continue
         used_source.add(key)
         stats.matched += 1
+        # Clear stale manual values (e.g. Pt1/Sa1 when month starts mid-week).
+        # openpyxl ignores value=None in cell(); assign via .value.
+        for col_idx in day_slot_columns:
+            ws.cell(row_idx, col_idx).value = None
         for day, col_idx in day_columns.items():
             if day not in day_map:
                 continue
-            ws.cell(row_idx, col_idx, day_map[day])
+            ws.cell(row_idx, col_idx).value = day_map[day]
             stats.filled_cells += 1
+        if carry_col is not None:
+            carry_hours = carry_by_name.get(key)
+            if carry_hours and carry_hours > 0:
+                value = int(carry_hours) if float(carry_hours).is_integer() else carry_hours
+                ws.cell(row_idx, carry_col).value = value
+                stats.carry_filled += 1
+            else:
+                ws.cell(row_idx, carry_col).value = 0
 
     stats.unmatched_source = sorted(name for name in source_by_name if name not in used_source)
 

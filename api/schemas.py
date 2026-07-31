@@ -129,6 +129,7 @@ class ReportFillStats(BaseModel):
     unmatched_template: list[str]
     unmatched_source: list[str]
     filled_cells: int
+    carry_filled: int = 0
     sheet_name: str
     year: int | None = None
     month: int | None = None

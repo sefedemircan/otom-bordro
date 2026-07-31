@@ -127,6 +127,7 @@ async def _resolve_report_result(
     month: int,
     *,
     prefer_snapshot: bool,
+    source_df=None,
 ) -> ReportResult:
     if prefer_snapshot and upload_id:
         try:
@@ -136,7 +137,11 @@ async def _resolve_report_result(
         except ValueError as exc:
             raise api_error(400, "INVALID_PERIOD", str(exc)) from exc
 
-    df, resolved_upload_id = await _load_report_dataframe_from_request(file, upload_id)
+    if source_df is not None:
+        df = source_df
+        resolved_upload_id = upload_id
+    else:
+        df, resolved_upload_id = await _load_report_dataframe_from_request(file, upload_id)
     result = _build_result_or_raise(df, year, month)
     if resolved_upload_id:
         try:
@@ -144,6 +149,15 @@ async def _resolve_report_result(
         except SupabaseError as exc:
             raise api_error(500, "REPORT_STORE_ERROR", str(exc)) from exc
     return result
+
+
+async def _resolve_source_dataframe(
+    file: UploadFile | None,
+    upload_id: str | None,
+):
+    """Kaynak Meyer dosyası — önceki ay devreden saat hesabı için."""
+    df, _ = await _load_report_dataframe_from_request(file, upload_id)
+    return df
 
 
 @router.post("/periods", response_model=PeriodsResponse)
@@ -254,15 +268,23 @@ async def build_monthly_report_v3(
 ) -> ReportV3BuildResponse:
     _validate_month(month)
     template_bytes = await _read_template_bytes(template)
+    source_df = await _resolve_source_dataframe(file, upload_id)
     result = await _resolve_report_result(
         file,
         upload_id,
         year,
         month,
         prefer_snapshot=True,
+        source_df=source_df,
     )
     try:
-        _, fill_stats = fill_otom_template(template_bytes, result, year, month)
+        _, fill_stats = fill_otom_template(
+            template_bytes,
+            result,
+            year,
+            month,
+            source_df=source_df,
+        )
     except ValueError as exc:
         raise api_error(400, "INVALID_TEMPLATE", str(exc)) from exc
 
@@ -283,15 +305,23 @@ async def download_filled_template_v3(
 ) -> Response:
     _validate_month(month)
     template_bytes = await _read_template_bytes(template)
+    source_df = await _resolve_source_dataframe(file, upload_id)
     result = await _resolve_report_result(
         file,
         upload_id,
         year,
         month,
         prefer_snapshot=True,
+        source_df=source_df,
     )
     try:
-        filled_bytes, _ = fill_otom_template(template_bytes, result, year, month)
+        filled_bytes, _ = fill_otom_template(
+            template_bytes,
+            result,
+            year,
+            month,
+            source_df=source_df,
+        )
     except ValueError as exc:
         raise api_error(400, "INVALID_TEMPLATE", str(exc)) from exc
 
