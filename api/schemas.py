@@ -124,6 +124,20 @@ class ReportBuildResponse(BaseModel):
     daily: list[dict[str, Any]]
 
 
+class ReportFillStats(BaseModel):
+    matched: int
+    unmatched_template: list[str]
+    unmatched_source: list[str]
+    filled_cells: int
+    sheet_name: str
+    year: int | None = None
+    month: int | None = None
+
+
+class ReportV3BuildResponse(ReportBuildResponse):
+    fill: ReportFillStats
+
+
 class ErrorDetail(BaseModel):
     code: str
     message: str
