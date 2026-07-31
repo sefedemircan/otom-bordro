@@ -19,6 +19,7 @@ from puantaj_report import (
     _is_public_holiday_date,
     _normalized_text,
     prepare_daily,
+    time_to_hours,
 )
 
 
@@ -465,14 +466,45 @@ def apply_employment_outside_codes(
                 day_map[day] = "X"
 
 
+def _punch_hours(row: pd.Series) -> float:
+    """Giriş/Çıkış damgasından net çalışma süresi (uzun vardiyada 1.25s mola)."""
+    start = time_to_hours(row.get("Giriş"))
+    end = time_to_hours(row.get("Çıkış"))
+    if start <= 0 and end <= 0:
+        return 0.0
+    if end <= start:
+        end += 24.0
+    span = end - start
+    if span <= 0.01:
+        return 0.0
+    break_h = 1.25 if span >= 6.0 else 0.0
+    return round(max(0.0, span - break_h), 2)
+
+
 def _raw_work_hours(row: pd.Series) -> float:
     for left, right in (("NM_h", "FM_h"), ("NM Güncel_h", "FM Güncel_h")):
         if left in row.index or right in row.index:
             try:
-                return float(row.get(left, 0) or 0) + float(row.get(right, 0) or 0)
+                hours = float(row.get(left, 0) or 0) + float(row.get(right, 0) or 0)
             except (TypeError, ValueError):
-                pass
-    return _hours_value(row)
+                hours = 0.0
+            if hours > 0.01:
+                return hours
+            break
+    punch = _punch_hours(row)
+    if punch > 0.01:
+        return punch
+    kod = row.get("Kod")
+    if isinstance(kod, (int, float)) and not pd.isna(kod) and float(kod) > 0:
+        return float(kod)
+    if isinstance(kod, str):
+        text = kod.strip().replace(",", ".")
+        try:
+            number = float(text)
+        except ValueError:
+            return 0.0
+        return number if number > 0 else 0.0
+    return 0.0
 
 
 def split_holiday_overtime(weekly_hours: float, holiday_hours: float) -> tuple[float, float]:
@@ -627,11 +659,11 @@ def fill_otom_template(
             if under_col is not None:
                 ws.cell(row_idx, under_col).value = (
                     int(under) if float(under).is_integer() else under
-                ) if under > 0 else 0
+                ) if under > 0 else None
             if over_col is not None:
                 ws.cell(row_idx, over_col).value = (
                     int(over) if float(over).is_integer() else over
-                ) if over > 0 else 0
+                ) if over > 0 else None
             if under > 0 or over > 0:
                 stats.holiday_manual_filled += 1
 

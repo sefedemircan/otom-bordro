@@ -306,7 +306,7 @@ def test_july_15_is_week_3_and_forced_b_with_manual_split():
     assert sheet.cell(3, 64).value == "B"
     # week hours excluding holiday: 9*4=36, holiday 4 → under 4, over 0
     assert sheet.cell(3, 78).value == 4
-    assert sheet.cell(3, 80).value == 0
+    assert sheet.cell(3, 80).value in (None, 0, "")
     # HIGH HOURS: week excl holiday = 9+9+9+9+7=43, holiday 4 → 2 / 2
     assert sheet.cell(5, 64).value == "B"
     assert sheet.cell(5, 78).value == 2
@@ -356,6 +356,55 @@ def test_employment_dates_fill_x_before_hire_and_after_exit():
     # After exit (20+) → X
     assert ws.cell(3, mapping[20]).value == "X"
     assert ws.cell(3, mapping[31]).value == "X"
+
+
+def test_holiday_hours_from_punch_when_nm_zero():
+    """Meyer resmi tatilde NM=0 bırakıp giriş/çıkış basmış olabilir."""
+    rows = []
+    for day, nm, giris, cikis in (
+        (13, 9, "08:00:00", "18:15:00"),
+        (14, 9, "08:00:00", "18:15:00"),
+        (15, 0, "07:40:00", "18:15:00"),  # holiday work via punch only
+        (16, 9, "08:00:00", "18:15:00"),
+        (17, 9, "08:00:00", "18:15:00"),
+        (18, 0, None, None),
+        (19, 0, None, None),
+    ):
+        rows.append({
+            "sicilno": "00003",
+            "Ad": "PUNCH",
+            "Soyad": "WORKER",
+            "mesaitarih": pd.Timestamp(2026, 7, day),
+            "NM": time(nm) if nm else time(0),
+            "FM": time(0),
+            "MS": time(9) if day <= 17 else time(0),
+            "EM": time(0),
+            "IZS": time(0),
+            "YIZS": time(0),
+            "SGKIZS": time(0),
+            "UCZIZS": time(0),
+            "RM": time(10) if day == 15 else time(0),
+            "RM Açıklama": "15.Tem" if day == 15 else "",
+            "Giriş": giris,
+            "Çıkış": cikis,
+            "İzin Açıklama": "#__#",
+            "Bölüm": "Üretim",
+        })
+    source = pd.DataFrame(rows)
+    result = build_report(source, 2026, 7)
+    tpl = _mini_template(
+        2026,
+        7,
+        employees=[("PUNCH WORKER", pd.Timestamp(2026, 1, 1), None)],
+    )
+    filled, stats = fill_otom_template(tpl, result, 2026, 7, source_df=source)
+    wb = load_workbook(BytesIO(filled))
+    ws = detect_puantaj_sheet(wb)
+    # week hours excl holiday ~= 36, punch net ~= 9.33 → room 9 → under 9 / over 0.33
+    assert ws.cell(3, 64).value == "B"
+    assert float(ws.cell(3, 78).value) == 9
+    assert abs(float(ws.cell(3, 80).value) - 0.33) < 0.01
+    assert stats.holiday_manual_filled >= 1
 
 
 def test_july_real_files_smoke():
