@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import re
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
@@ -373,6 +374,97 @@ def apply_holiday_codes(
             day_map[day] = "B"
 
 
+def _parse_excel_date(value: object) -> pd.Timestamp | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        ts = pd.Timestamp(value)
+    elif isinstance(value, date):
+        ts = pd.Timestamp(value)
+    else:
+        ts = pd.to_datetime(value, dayfirst=True, errors="coerce")
+    if ts is None or pd.isna(ts):
+        return None
+    # Excel empty date cells sometimes become 00:00:00 / 1899-12-30.
+    if ts.year < 1905:
+        return None
+    return ts.normalize()
+
+
+def _find_employee_sheet(wb):
+    for ws in wb.worksheets:
+        title_key = _column_key(ws.title)
+        if "CALISAN" in title_key and "BILGI" in title_key:
+            return ws
+        # Header-based detection
+        for row in range(1, min(4, ws.max_row + 1)):
+            keys = {_column_key(ws.cell(row, col).value) for col in range(1, min(25, ws.max_column + 1))}
+            if "ADISOYADI" in keys and "GIRISTARIHI" in keys:
+                return ws
+    return None
+
+
+def load_employment_windows(wb) -> dict[str, tuple[pd.Timestamp | None, pd.Timestamp | None]]:
+    """ADI SOYADI → (giriş, çıkış) — Çalışan Bilgileri sheet'inden."""
+    ws = _find_employee_sheet(wb)
+    if ws is None:
+        return {}
+
+    header_row = None
+    for row in range(1, min(5, ws.max_row + 1)):
+        for col in range(1, min(25, ws.max_column + 1)):
+            if _column_key(ws.cell(row, col).value) == "ADISOYADI":
+                header_row = row
+                break
+        if header_row is not None:
+            break
+    if header_row is None:
+        return {}
+
+    name_col = giris_col = cikis_col = None
+    for col in range(1, ws.max_column + 1):
+        key = _column_key(ws.cell(header_row, col).value)
+        if key == "ADISOYADI":
+            name_col = col
+        elif key == "GIRISTARIHI":
+            giris_col = col
+        elif key == "CIKISTARIHI":
+            cikis_col = col
+    if name_col is None:
+        return {}
+
+    windows: dict[str, tuple[pd.Timestamp | None, pd.Timestamp | None]] = {}
+    for row_idx in range(header_row + 1, ws.max_row + 1):
+        raw_name = ws.cell(row_idx, name_col).value
+        if raw_name is None or not str(raw_name).strip():
+            continue
+        key = _normalized_text(raw_name)
+        giris = _parse_excel_date(ws.cell(row_idx, giris_col).value) if giris_col else None
+        cikis = _parse_excel_date(ws.cell(row_idx, cikis_col).value) if cikis_col else None
+        windows[key] = (giris, cikis)
+    return windows
+
+
+def apply_employment_outside_codes(
+    source_by_name: dict[str, dict[int, object]],
+    year: int,
+    month: int,
+    employment: dict[str, tuple[pd.Timestamp | None, pd.Timestamp | None]],
+) -> None:
+    """Giriş öncesi / çıkış sonrası günleri X (sayılmayan) yap."""
+    days_in_month = int(pd.Timestamp(year=year, month=month, day=1).days_in_month)
+    for name, day_map in source_by_name.items():
+        giris, cikis = employment.get(name, (None, None))
+        if giris is None and cikis is None:
+            continue
+        for day in range(1, days_in_month + 1):
+            current = pd.Timestamp(year=year, month=month, day=day)
+            if giris is not None and current < giris:
+                day_map[day] = "X"
+            elif cikis is not None and current > cikis:
+                day_map[day] = "X"
+
+
 def _raw_work_hours(row: pd.Series) -> float:
     for left, right in (("NM_h", "FM_h"), ("NM Güncel_h", "FM Güncel_h")):
         if left in row.index or right in row.index:
@@ -398,6 +490,7 @@ def holiday_manual_hours_by_person(
     month: int,
     holiday_days: set[int],
     carry_by_name: dict[str, float] | None = None,
+    employment: dict[str, tuple[pd.Timestamp | None, pd.Timestamp | None]] | None = None,
 ) -> dict[str, dict[int, tuple[float, float]]]:
     """person → week → (aşmayan, aşan) saatleri."""
     if not holiday_days or daily is None or daily.empty:
@@ -419,6 +512,16 @@ def holiday_manual_hours_by_person(
     holiday_weeks = {
         template_week_for_day(year, month, day) for day in holiday_days
     }
+    employment = employment or {}
+
+    def _in_employment(person: str, day: int) -> bool:
+        giris, cikis = employment.get(person, (None, None))
+        current = pd.Timestamp(year=year, month=month, day=day)
+        if giris is not None and current < giris:
+            return False
+        if cikis is not None and current > cikis:
+            return False
+        return True
 
     result: dict[str, dict[int, tuple[float, float]]] = {}
     for person, group in frame.groupby(frame["Personel"].map(_normalized_text)):
@@ -426,7 +529,10 @@ def holiday_manual_hours_by_person(
             continue
         week_map: dict[int, tuple[float, float]] = {}
         for week in holiday_weeks:
-            week_rows = group[group["week"] == week]
+            week_rows = group[group["week"] == week].copy()
+            if week_rows.empty:
+                continue
+            week_rows = week_rows[week_rows["day"].map(lambda day: _in_employment(person, int(day)))]
             if week_rows.empty:
                 continue
             weekly_hours = float(week_rows.loc[~week_rows["is_holiday"], "work_h"].sum())
@@ -458,6 +564,7 @@ def fill_otom_template(
     day_columns = resolve_day_columns(ws, year, month)
     holiday_manual_cols = resolve_holiday_manual_columns(ws)
     source_by_name = monthly_codes_by_person(result.monthly)
+    employment = load_employment_windows(wb)
     if carry_by_name is not None:
         resolved_carry = carry_by_name
     elif source_df is not None:
@@ -467,12 +574,15 @@ def fill_otom_template(
 
     holiday_days = detect_holiday_days(result.daily, year, month)
     apply_holiday_codes(source_by_name, holiday_days)
+    # Giriş/çıkış X kodu tatil B'sinin üzerine yazılır.
+    apply_employment_outside_codes(source_by_name, year, month, employment)
     holiday_manual = holiday_manual_hours_by_person(
         result.daily,
         year,
         month,
         holiday_days,
         carry_by_name=resolved_carry,
+        employment=employment,
     )
     used_source: set[str] = set()
 
@@ -499,7 +609,11 @@ def fill_otom_template(
             ws.cell(row_idx, col_idx).value = day_map[day]
             stats.filled_cells += 1
         if carry_col is not None:
+            giris, _cikis = employment.get(key, (None, None))
             carry_hours = resolved_carry.get(key)
+            # Ay ortası girişte önceki aydan carry yazılmaz.
+            if giris is not None and giris > pd.Timestamp(year=year, month=month, day=1):
+                carry_hours = 0
             if carry_hours and carry_hours > 0:
                 value = int(carry_hours) if float(carry_hours).is_integer() else carry_hours
                 ws.cell(row_idx, carry_col).value = value

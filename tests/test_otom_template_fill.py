@@ -23,7 +23,12 @@ JULY_TEMPLATE = WEB_PUBLIC / "TEMMUZ OTOM PUANTAJ KOPYA.xlsx"
 JULY_CSV = WEB_PUBLIC / "download 2.csv"
 
 
-def _mini_template(year: int = 2026, month: int = 6) -> bytes:
+def _mini_template(
+    year: int = 2026,
+    month: int = 6,
+    *,
+    employees: list[tuple[str, object | None, object | None]] | None = None,
+) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "2026 Puantaj"
@@ -77,12 +82,26 @@ def _mini_template(year: int = 2026, month: int = 6) -> bytes:
             f"{week}h Hafta Tat. + R. T. Fazla Ç. 45 i aşan kısım (Manuel)",
         )
 
-    ws.cell(3, 3, "  TEST PERSONEL")
-    ws.cell(3, 12, year)
-    ws.cell(3, 13, month)
-    ws.cell(4, 3, "  UNKNOWN PERSON")
-    ws.cell(4, 12, year)
-    ws.cell(4, 13, month)
+    default_employees = employees or [
+        ("TEST PERSONEL", None, None),
+        ("UNKNOWN PERSON", None, None),
+    ]
+    for idx, (name, _giris, _cikis) in enumerate(default_employees):
+        row = 3 + idx
+        ws.cell(row, 3, f"  {name}")
+        ws.cell(row, 12, year)
+        ws.cell(row, 13, month)
+
+    emp = wb.create_sheet("Çalışan Bilgileri")
+    emp.cell(1, 3, " ADI SOYADI")
+    emp.cell(1, 11, "GİRİŞ TARİHİ")
+    emp.cell(1, 12, "ÇIKIŞ TARİHİ")
+    for idx, (name, giris, cikis) in enumerate(default_employees):
+        emp.cell(2 + idx, 3, f"  {name}")
+        if giris is not None:
+            emp.cell(2 + idx, 11, giris)
+        if cikis is not None:
+            emp.cell(2 + idx, 12, cikis)
 
     buffer = BytesIO()
     wb.save(buffer)
@@ -293,6 +312,50 @@ def test_july_15_is_week_3_and_forced_b_with_manual_split():
     assert sheet.cell(5, 78).value == 2
     assert sheet.cell(5, 80).value == 2
     assert stats.holiday_manual_filled >= 1
+
+
+def test_employment_dates_fill_x_before_hire_and_after_exit():
+    rows = []
+    for day in range(1, 32):
+        rows.append({
+            "sicilno": "00001",
+            "Ad": "TEST",
+            "Soyad": "PERSONEL",
+            "mesaitarih": pd.Timestamp(2026, 7, day),
+            "NM": time(9) if day < 6 else time(0),
+            "FM": time(0),
+            "MS": time(9) if day < 6 else time(0),
+            "EM": time(0),
+            "IZS": time(0),
+            "YIZS": time(0),
+            "SGKIZS": time(0),
+            "UCZIZS": time(0),
+            "RM": time(0),
+            "İzin Açıklama": "#__#",
+            "Bölüm": "Üretim",
+        })
+    source = pd.DataFrame(rows)
+    result = build_report(source, 2026, 7)
+    tpl = _mini_template(
+        2026,
+        7,
+        employees=[
+            ("TEST PERSONEL", pd.Timestamp(2026, 7, 16), pd.Timestamp(2026, 7, 19)),
+            ("UNKNOWN PERSON", None, None),
+        ],
+    )
+    filled, _stats = fill_otom_template(tpl, result, 2026, 7, source_df=source)
+    wb = load_workbook(BytesIO(filled))
+    ws = detect_puantaj_sheet(wb)
+    mapping = resolve_day_columns(ws, 2026, 7)
+    # Before hire (1..15) → X
+    assert ws.cell(3, mapping[15]).value == "X"
+    # Hire day and exit day inclusive stay non-X from employment rule
+    assert ws.cell(3, mapping[16]).value != "X"
+    assert ws.cell(3, mapping[19]).value != "X"
+    # After exit (20+) → X
+    assert ws.cell(3, mapping[20]).value == "X"
+    assert ws.cell(3, mapping[31]).value == "X"
 
 
 def test_july_real_files_smoke():
