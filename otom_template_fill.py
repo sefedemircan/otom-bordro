@@ -152,12 +152,25 @@ def _hours_value(row: pd.Series) -> float:
     for left, right in (
         ("NM Güncel_h", "FM Güncel_h"),
         ("NM_h", "FM_h"),
+        ("Normal Çalışma", "Fazla Mesai"),
     ):
         if left in row.index or right in row.index:
-            return float(row.get(left, 0) or 0) + float(row.get(right, 0) or 0)
+            left_val = row.get(left, 0)
+            right_val = row.get(right, 0)
+            try:
+                return float(left_val or 0) + float(right_val or 0)
+            except (TypeError, ValueError):
+                pass
     kod = row.get("Kod")
     if isinstance(kod, (int, float)) and not pd.isna(kod):
         return float(kod) if float(kod) > 0 else 0.0
+    if isinstance(kod, str):
+        text = kod.strip().replace(",", ".")
+        try:
+            number = float(text)
+        except ValueError:
+            return 0.0
+        return number if number > 0 else 0.0
     return 0.0
 
 
@@ -193,6 +206,44 @@ def compute_carryover_hours(daily_all: pd.DataFrame, year: int, month: int) -> d
 def carryover_hours_from_source(source_df: pd.DataFrame, year: int, month: int) -> dict[str, float]:
     daily_all, _, _ = prepare_daily(source_df)
     return compute_carryover_hours(daily_all, year, month)
+
+
+def carryover_hours_from_upload_snapshots(upload_id: str, year: int, month: int) -> dict[str, float]:
+    """Report upload'ları ham satır tutmaz; önceki ay snapshot daily'sinden carry hesapla."""
+    from api.services.report_snapshots import load_report_result_from_snapshot
+    from api.services.supabase import SupabaseError
+
+    period_start = pd.Timestamp(year=year, month=month, day=1)
+    first_weekday = int(period_start.dayofweek)
+    if first_weekday == 0:
+        return {}
+
+    carry_start = period_start - pd.Timedelta(days=first_weekday)
+    carry_end = period_start - pd.Timedelta(days=1)
+    months_needed = sorted({
+        (int(carry_start.year), int(carry_start.month)),
+        (int(carry_end.year), int(carry_end.month)),
+    })
+
+    frames: list[pd.DataFrame] = []
+    for prev_year, prev_month in months_needed:
+        if (prev_year, prev_month) == (year, month):
+            continue
+        try:
+            prev_result = load_report_result_from_snapshot(upload_id, prev_year, prev_month)
+        except SupabaseError:
+            continue
+        if prev_result.daily is None or prev_result.daily.empty:
+            continue
+        frames.append(prev_result.daily.copy())
+
+    if not frames:
+        return {}
+
+    daily = pd.concat(frames, ignore_index=True)
+    if "Tarih" in daily.columns:
+        daily["Tarih"] = pd.to_datetime(daily["Tarih"], format="mixed", dayfirst=True, errors="coerce")
+    return compute_carryover_hours(daily, year, month)
 
 
 def _cell_value_for_template(raw: object) -> object | None:
@@ -252,6 +303,7 @@ def fill_otom_template(
     year: int,
     month: int,
     source_df: pd.DataFrame | None = None,
+    carry_by_name: dict[str, float] | None = None,
 ) -> tuple[bytes, FillStats]:
     wb = load_workbook(io.BytesIO(template_bytes))
     ws = detect_puantaj_sheet(wb)
@@ -261,9 +313,12 @@ def fill_otom_template(
     day_slot_columns = _all_day_slot_columns(ws)
     day_columns = resolve_day_columns(ws, year, month)
     source_by_name = monthly_codes_by_person(result.monthly)
-    carry_by_name = (
-        carryover_hours_from_source(source_df, year, month) if source_df is not None else {}
-    )
+    if carry_by_name is not None:
+        resolved_carry = carry_by_name
+    elif source_df is not None:
+        resolved_carry = carryover_hours_from_source(source_df, year, month)
+    else:
+        resolved_carry = {}
     used_source: set[str] = set()
 
     stats = FillStats(sheet_name=ws.title, year=year, month=month)
@@ -289,7 +344,7 @@ def fill_otom_template(
             ws.cell(row_idx, col_idx).value = day_map[day]
             stats.filled_cells += 1
         if carry_col is not None:
-            carry_hours = carry_by_name.get(key)
+            carry_hours = resolved_carry.get(key)
             if carry_hours and carry_hours > 0:
                 value = int(carry_hours) if float(carry_hours).is_integer() else carry_hours
                 ws.cell(row_idx, carry_col).value = value

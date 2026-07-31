@@ -155,9 +155,37 @@ async def _resolve_source_dataframe(
     file: UploadFile | None,
     upload_id: str | None,
 ):
-    """Kaynak Meyer dosyası — önceki ay devreden saat hesabı için."""
-    df, _ = await _load_report_dataframe_from_request(file, upload_id)
-    return df
+    """Kaynak Meyer dosyası — yalnızca ham file gönderildiyse.
+
+    Report upload_id yolunda ham satır tutulmaz; carry snapshot'tan hesaplanır.
+    """
+    if upload_id and file is None:
+        return None
+    if file is None and not upload_id:
+        raise api_error(400, "INVALID_FILE", "file veya upload_id gönderilmelidir.")
+    if file is None:
+        return None
+    data, filename = await read_upload_bytes(file)
+    return load_report_dataframe(data, filename)
+
+
+def _resolve_carry_hours(
+    *,
+    upload_id: str | None,
+    source_df,
+    year: int,
+    month: int,
+) -> dict[str, float]:
+    from otom_template_fill import (
+        carryover_hours_from_source,
+        carryover_hours_from_upload_snapshots,
+    )
+
+    if source_df is not None:
+        return carryover_hours_from_source(source_df, year, month)
+    if upload_id:
+        return carryover_hours_from_upload_snapshots(upload_id, year, month)
+    return {}
 
 
 @router.post("/periods", response_model=PeriodsResponse)
@@ -277,13 +305,19 @@ async def build_monthly_report_v3(
         prefer_snapshot=True,
         source_df=source_df,
     )
+    carry_by_name = _resolve_carry_hours(
+        upload_id=upload_id,
+        source_df=source_df,
+        year=year,
+        month=month,
+    )
     try:
         _, fill_stats = fill_otom_template(
             template_bytes,
             result,
             year,
             month,
-            source_df=source_df,
+            carry_by_name=carry_by_name,
         )
     except ValueError as exc:
         raise api_error(400, "INVALID_TEMPLATE", str(exc)) from exc
@@ -314,13 +348,19 @@ async def download_filled_template_v3(
         prefer_snapshot=True,
         source_df=source_df,
     )
+    carry_by_name = _resolve_carry_hours(
+        upload_id=upload_id,
+        source_df=source_df,
+        year=year,
+        month=month,
+    )
     try:
         filled_bytes, _ = fill_otom_template(
             template_bytes,
             result,
             year,
             month,
-            source_df=source_df,
+            carry_by_name=carry_by_name,
         )
     except ValueError as exc:
         raise api_error(400, "INVALID_TEMPLATE", str(exc)) from exc
