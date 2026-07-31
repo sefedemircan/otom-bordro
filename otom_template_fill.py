@@ -11,7 +11,14 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from puantaj_report import ReportResult, _column_key, _normalized_text, prepare_daily
+from puantaj_report import (
+    WEEKLY_MAX_HOURS,
+    ReportResult,
+    _column_key,
+    _is_public_holiday_date,
+    _normalized_text,
+    prepare_daily,
+)
 
 
 DAY_SLOT_PATTERN = re.compile(
@@ -28,6 +35,7 @@ class FillStats:
     unmatched_source: list[str] = field(default_factory=list)
     filled_cells: int = 0
     carry_filled: int = 0
+    holiday_manual_filled: int = 0
     sheet_name: str = ""
     year: int | None = None
     month: int | None = None
@@ -39,6 +47,7 @@ class FillStats:
             "unmatched_source": self.unmatched_source,
             "filled_cells": self.filled_cells,
             "carry_filled": self.carry_filled,
+            "holiday_manual_filled": self.holiday_manual_filled,
             "sheet_name": self.sheet_name,
             "year": self.year,
             "month": self.month,
@@ -297,6 +306,141 @@ def _all_day_slot_columns(ws: Worksheet) -> list[int]:
     ]
 
 
+def resolve_holiday_manual_columns(ws: Worksheet) -> dict[int, tuple[int | None, int | None]]:
+    """Hafta no → (45'i aşmayan manuel kolon, 45'i aşan manuel kolon)."""
+    header_row = _header_row(ws)
+    under: dict[int, int] = {}
+    over: dict[int, int] = {}
+    for col in range(1, ws.max_column + 1):
+        key = _column_key(ws.cell(header_row, col).value)
+        match = re.match(r"^(\d+)H", key)
+        if not match or "MANUEL" not in key:
+            continue
+        week = int(match.group(1))
+        if "ASMAYAN" in key and ("HAFTATAT" in key or "RESMITAT" in key):
+            under[week] = col
+        elif "ASAN" in key and "ASMAYAN" not in key and ("HAFTATAT" in key or "RT" in key):
+            over[week] = col
+    weeks = sorted(set(under) | set(over))
+    return {week: (under.get(week), over.get(week)) for week in weeks}
+
+
+def template_week_for_day(year: int, month: int, day: int) -> int:
+    first_weekday = int(pd.Timestamp(year=year, month=month, day=1).dayofweek)
+    return (first_weekday + day - 1) // 7 + 1
+
+
+def days_in_template_week(year: int, month: int, week_index: int) -> list[int]:
+    days_in_month = int(pd.Timestamp(year=year, month=month, day=1).days_in_month)
+    return [
+        day
+        for day in range(1, days_in_month + 1)
+        if template_week_for_day(year, month, day) == week_index
+    ]
+
+
+def detect_holiday_days(daily: pd.DataFrame, year: int, month: int) -> set[int]:
+    days_in_month = int(pd.Timestamp(year=year, month=month, day=1).days_in_month)
+    holidays = {
+        day
+        for day in range(1, days_in_month + 1)
+        if _is_public_holiday_date(pd.Timestamp(year=year, month=month, day=day))
+    }
+    if daily is None or daily.empty or "Tarih" not in daily.columns:
+        return holidays
+    frame = daily.copy()
+    frame["Tarih"] = pd.to_datetime(frame["Tarih"], format="mixed", dayfirst=True, errors="coerce")
+    frame = frame.dropna(subset=["Tarih"])
+    frame = frame[
+        (frame["Tarih"].dt.year == year) & (frame["Tarih"].dt.month == month)
+    ]
+    if "Durum" in frame.columns:
+        holidays.update(
+            int(day)
+            for day in frame.loc[frame["Durum"].eq("RESMI_TATIL"), "Tarih"].dt.day.tolist()
+        )
+    return holidays
+
+
+def apply_holiday_codes(
+    source_by_name: dict[str, dict[int, object]],
+    holiday_days: set[int],
+) -> None:
+    for day_map in source_by_name.values():
+        for day in holiday_days:
+            if day_map.get(day) == "X":
+                continue
+            day_map[day] = "B"
+
+
+def _raw_work_hours(row: pd.Series) -> float:
+    for left, right in (("NM_h", "FM_h"), ("NM Güncel_h", "FM Güncel_h")):
+        if left in row.index or right in row.index:
+            try:
+                return float(row.get(left, 0) or 0) + float(row.get(right, 0) or 0)
+            except (TypeError, ValueError):
+                pass
+    return _hours_value(row)
+
+
+def split_holiday_overtime(weekly_hours: float, holiday_hours: float) -> tuple[float, float]:
+    if holiday_hours <= 0:
+        return 0.0, 0.0
+    room = max(0.0, WEEKLY_MAX_HOURS - max(0.0, weekly_hours))
+    under = min(holiday_hours, room)
+    over = max(0.0, holiday_hours - under)
+    return round(under, 2), round(over, 2)
+
+
+def holiday_manual_hours_by_person(
+    daily: pd.DataFrame,
+    year: int,
+    month: int,
+    holiday_days: set[int],
+    carry_by_name: dict[str, float] | None = None,
+) -> dict[str, dict[int, tuple[float, float]]]:
+    """person → week → (aşmayan, aşan) saatleri."""
+    if not holiday_days or daily is None or daily.empty:
+        return {}
+
+    frame = daily.copy()
+    frame["Tarih"] = pd.to_datetime(frame["Tarih"], format="mixed", dayfirst=True, errors="coerce")
+    frame = frame.dropna(subset=["Tarih"])
+    frame = frame[
+        (frame["Tarih"].dt.year == year) & (frame["Tarih"].dt.month == month)
+    ].copy()
+    if frame.empty:
+        return {}
+
+    frame["day"] = frame["Tarih"].dt.day.astype(int)
+    frame["week"] = frame["day"].map(lambda day: template_week_for_day(year, month, int(day)))
+    frame["work_h"] = frame.apply(_raw_work_hours, axis=1)
+    frame["is_holiday"] = frame["day"].isin(holiday_days)
+    holiday_weeks = {
+        template_week_for_day(year, month, day) for day in holiday_days
+    }
+
+    result: dict[str, dict[int, tuple[float, float]]] = {}
+    for person, group in frame.groupby(frame["Personel"].map(_normalized_text)):
+        if not person:
+            continue
+        week_map: dict[int, tuple[float, float]] = {}
+        for week in holiday_weeks:
+            week_rows = group[group["week"] == week]
+            if week_rows.empty:
+                continue
+            weekly_hours = float(week_rows.loc[~week_rows["is_holiday"], "work_h"].sum())
+            if week == 1 and carry_by_name:
+                weekly_hours += float(carry_by_name.get(person, 0) or 0)
+            holiday_hours = float(week_rows.loc[week_rows["is_holiday"], "work_h"].sum())
+            under, over = split_holiday_overtime(weekly_hours, holiday_hours)
+            if under > 0 or over > 0:
+                week_map[week] = (under, over)
+        if week_map:
+            result[person] = week_map
+    return result
+
+
 def fill_otom_template(
     template_bytes: bytes,
     result: ReportResult,
@@ -312,6 +456,7 @@ def fill_otom_template(
     carry_col = _find_carry_column(ws, header_row)
     day_slot_columns = _all_day_slot_columns(ws)
     day_columns = resolve_day_columns(ws, year, month)
+    holiday_manual_cols = resolve_holiday_manual_columns(ws)
     source_by_name = monthly_codes_by_person(result.monthly)
     if carry_by_name is not None:
         resolved_carry = carry_by_name
@@ -319,6 +464,16 @@ def fill_otom_template(
         resolved_carry = carryover_hours_from_source(source_df, year, month)
     else:
         resolved_carry = {}
+
+    holiday_days = detect_holiday_days(result.daily, year, month)
+    apply_holiday_codes(source_by_name, holiday_days)
+    holiday_manual = holiday_manual_hours_by_person(
+        result.daily,
+        year,
+        month,
+        holiday_days,
+        carry_by_name=resolved_carry,
+    )
     used_source: set[str] = set()
 
     stats = FillStats(sheet_name=ws.title, year=year, month=month)
@@ -351,6 +506,20 @@ def fill_otom_template(
                 stats.carry_filled += 1
             else:
                 ws.cell(row_idx, carry_col).value = 0
+
+        person_holiday = holiday_manual.get(key, {})
+        for week, (under_col, over_col) in holiday_manual_cols.items():
+            under, over = person_holiday.get(week, (0.0, 0.0))
+            if under_col is not None:
+                ws.cell(row_idx, under_col).value = (
+                    int(under) if float(under).is_integer() else under
+                ) if under > 0 else 0
+            if over_col is not None:
+                ws.cell(row_idx, over_col).value = (
+                    int(over) if float(over).is_integer() else over
+                ) if over > 0 else 0
+            if under > 0 or over > 0:
+                stats.holiday_manual_filled += 1
 
     stats.unmatched_source = sorted(name for name in source_by_name if name not in used_source)
 

@@ -11,6 +11,8 @@ from otom_template_fill import (
     fill_otom_template,
     monthly_codes_by_person,
     resolve_day_columns,
+    split_holiday_overtime,
+    template_week_for_day,
 )
 from puantaj_report import build_report, prepare_daily, read_puantaj_file, _normalized_text
 from test_puantaj_report import sample_frame
@@ -56,6 +58,24 @@ def _mini_template(year: int = 2026, month: int = 6) -> bytes:
         ws.cell(2, 81 + offset, label)
     for offset, label in enumerate(("Pt5", "Sa5", "Ça5", "Pe5", "Cu5", "Ct5", "Pz5")):
         ws.cell(2, 100 + offset, label)
+    # Holiday manual columns per week (under / over)
+    for week, under_col, over_col in (
+        (1, 40, 42),
+        (2, 59, 61),
+        (3, 78, 80),
+        (4, 97, 99),
+        (5, 116, 118),
+    ):
+        ws.cell(
+            2,
+            under_col,
+            f"{week}h Hafta Tat+ Resmi Tat F. Ç. 45 i aşmayan kısım (Manuel)",
+        )
+        ws.cell(
+            2,
+            over_col,
+            f"{week}h Hafta Tat. + R. T. Fazla Ç. 45 i aşan kısım (Manuel)",
+        )
 
     ws.cell(3, 3, "  TEST PERSONEL")
     ws.cell(3, 12, year)
@@ -180,6 +200,99 @@ def test_monthly_codes_normalize_z_star():
     assert by_person["ALI VELI"][1] == "Z"
     assert by_person["ALI VELI"][2] == 9
     assert by_person["ALI VELI"][3] == "T"
+
+
+def test_split_holiday_overtime_example():
+    under, over = split_holiday_overtime(43, 4)
+    assert under == 2
+    assert over == 2
+    assert split_holiday_overtime(45, 4) == (0, 4)
+    assert split_holiday_overtime(40, 3) == (3, 0)
+
+
+def test_july_15_is_week_3_and_forced_b_with_manual_split():
+    rows = []
+    # Week 3 days for July 2026: 13-19 (Wed start month → week3)
+    assert template_week_for_day(2026, 7, 15) == 3
+    for day, nm, fm, rm, rm_desc in (
+        (13, 9, 0, 0, ""),
+        (14, 9, 0, 0, ""),
+        (15, 4, 0, 0, "15.Tem"),  # holiday work 4h; week so far 18 → room 27
+        (16, 9, 0, 0, ""),
+        (17, 9, 0, 0, ""),
+        (18, 0, 0, 0, ""),
+        (19, 0, 0, 0, ""),
+    ):
+        rows.append({
+            "sicilno": "00001",
+            "Ad": "TEST",
+            "Soyad": "PERSONEL",
+            "mesaitarih": pd.Timestamp(2026, 7, day),
+            "NM": time(nm) if nm else time(0),
+            "FM": time(fm) if fm else time(0),
+            "MS": time(9) if day <= 17 else time(0),
+            "EM": time(0),
+            "IZS": time(0),
+            "YIZS": time(0),
+            "SGKIZS": time(0),
+            "UCZIZS": time(0),
+            "RM": time(rm) if rm else time(0),
+            "RM Açıklama": rm_desc,
+            "İzin Açıklama": "#__#",
+            "Bölüm": "Üretim",
+        })
+    # Second person: week hours 43 equivalent via 9*4 + 7 = 43 before holiday? 
+    # Use explicit: 13-14:9+9=18, 16-17:9+9=18, total 36 without holiday; holiday 4 → all under
+    source = pd.DataFrame(rows)
+    # Add high-hour person for 43+4 split
+    extra = []
+    for day, nm in ((13, 9), (14, 9), (15, 4), (16, 9), (17, 9), (18, 7), (19, 0)):
+        extra.append({
+            "sicilno": "00002",
+            "Ad": "HIGH",
+            "Soyad": "HOURS",
+            "mesaitarih": pd.Timestamp(2026, 7, day),
+            "NM": time(nm) if nm else time(0),
+            "FM": time(0),
+            "MS": time(9) if nm else time(0),
+            "EM": time(0),
+            "IZS": time(0),
+            "YIZS": time(0),
+            "SGKIZS": time(0),
+            "UCZIZS": time(0),
+            "RM": time(0),
+            "RM Açıklama": "15.Tem" if day == 15 else "",
+            "İzin Açıklama": "#__#",
+            "Bölüm": "Üretim",
+        })
+    source = pd.concat([source, pd.DataFrame(extra)], ignore_index=True)
+    # Expand mini template names
+    tpl = _mini_template(2026, 7)
+    wb = load_workbook(BytesIO(tpl))
+    ws = detect_puantaj_sheet(wb)
+    ws.cell(5, 3, "  HIGH HOURS")
+    ws.cell(5, 12, 2026)
+    ws.cell(5, 13, 7)
+    buf = BytesIO()
+    wb.save(buf)
+    tpl = buf.getvalue()
+
+    result = build_report(source, 2026, 7)
+    assert result.monthly.loc[result.monthly["Personel"].eq("TEST PERSONEL"), "15 Ça"].iloc[0] == "B"
+
+    filled, stats = fill_otom_template(tpl, result, 2026, 7, source_df=source)
+    out = load_workbook(BytesIO(filled))
+    sheet = detect_puantaj_sheet(out)
+    # TEST PERSONEL row 3: July 15 = Ça3 col 64
+    assert sheet.cell(3, 64).value == "B"
+    # week hours excluding holiday: 9*4=36, holiday 4 → under 4, over 0
+    assert sheet.cell(3, 78).value == 4
+    assert sheet.cell(3, 80).value == 0
+    # HIGH HOURS: week excl holiday = 9+9+9+9+7=43, holiday 4 → 2 / 2
+    assert sheet.cell(5, 64).value == "B"
+    assert sheet.cell(5, 78).value == 2
+    assert sheet.cell(5, 80).value == 2
+    assert stats.holiday_manual_filled >= 1
 
 
 def test_july_real_files_smoke():

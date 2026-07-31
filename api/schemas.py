@@ -130,6 +130,7 @@ class ReportFillStats(BaseModel):
     unmatched_source: list[str]
     filled_cells: int
     carry_filled: int = 0
+    holiday_manual_filled: int = 0
     sheet_name: str
     year: int | None = None
     month: int | None = None

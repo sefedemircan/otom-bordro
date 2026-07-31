@@ -33,6 +33,17 @@ SUNDAY_PROTECTING_STATUSES = frozenset({
     "HARIC",
 })
 
+# Sabit resmi tatiller (ay, gün) — dini bayramlar veri işaretinden yakalanır.
+FIXED_PUBLIC_HOLIDAYS = frozenset({
+    (1, 1),
+    (4, 23),
+    (5, 1),
+    (5, 19),
+    (7, 15),
+    (8, 30),
+    (10, 29),
+})
+
 STATUS_LABELS = {
     "CALISMA": "Çalışma",
     "YILLIK_IZIN": "Yıllık İzin",
@@ -288,11 +299,46 @@ def _context_caused_sunday_cut(
     return context_triggers
 
 
+def _is_public_holiday_date(value: object) -> bool:
+    ts = pd.Timestamp(value) if value is not None and not pd.isna(value) else None
+    if ts is None or pd.isna(ts):
+        return False
+    return (int(ts.month), int(ts.day)) in FIXED_PUBLIC_HOLIDAYS
+
+
+def _is_public_holiday_marker(value: object) -> bool:
+    text = _normalized_text(value).replace(" ", "").replace(".", "")
+    if not text:
+        return False
+    markers = (
+        "15TEM",
+        "30AGU",
+        "29EKIM",
+        "23NIS",
+        "19MAY",
+        "1MAYIS",
+        "1MAY",
+        "1OCAK",
+        "YILBASI",
+        "CUMHURIYET",
+        "ZAFER",
+        "DEMOKRASI",
+        "ULUSALEGEMENLIK",
+        "EMEKVE",
+        "RAMAZAN",
+        "KURBAN",
+    )
+    return any(marker in text for marker in markers)
+
+
 def _classify_row(row: pd.Series) -> str:
     source_status = _source_status_from_code(row.get("Kaynak Kod", ""))
     if source_status:
         return source_status
     description = _normalized_text(row.get("İzin Açıklama", ""))
+    rm_description = row.get("RM Açıklama", row.get("RM Aciklama", ""))
+    if _is_public_holiday_date(row.get("Tarih")) or _is_public_holiday_marker(rm_description):
+        return "RESMI_TATIL"
     if row["SGKIZS_h"] > 0 or row["RM_h"] > 0 or "RAPOR" in description or "SGK" in description:
         return "RAPOR"
     if row["YIZS_h"] > 0 or "YILLIK" in description:
